@@ -116,3 +116,20 @@ describe("theme presets", () => {
     assert.equal(applyThemePreset("nope", presets), null);
   });
 });
+
+describe("keyboard and reconnect", () => {
+  it("maps ctrl-dot to interrupt and not ctrl-c", () => {
+    const { shortcutAction } = loadPureClient();
+    assert.equal(shortcutAction({ key: ".", ctrlKey: true, metaKey: false }), "interrupt");
+    assert.equal(shortcutAction({ key: "c", ctrlKey: true, hasSelection: true }), "copy");
+    assert.equal(shortcutAction({ key: "c", ctrlKey: true, hasSelection: false }), null);
+    assert.equal(shortcutAction({ key: "p", ctrlKey: true }), "command_palette");
+    assert.equal(shortcutAction({ key: "k", metaKey: true }), "command_palette");
+  });
+
+  it("reconnect with gap requests snapshot", () => {
+    const { reconnectPlan } = loadPureClient();
+    assert.equal(reconnectPlan({ lastEventId: 1, snapshotRequired: true }).mode, "snapshot");
+    assert.equal(reconnectPlan({ lastEventId: 11, snapshotRequired: false }).mode, "replay");
+  });
+});

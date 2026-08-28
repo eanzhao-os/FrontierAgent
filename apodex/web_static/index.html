@@ -643,6 +643,7 @@
       const btn = (label, decision, extra) => (
         <button
           type="button"
+          aria-label={`${label} (${decision})`}
           autoFocus={decision === "reject"}
           disabled={extra && extra.disabled}
           onClick={() => onResolve(decision, confirmation)}
@@ -696,6 +697,7 @@
 
           <input
             type="text"
+            aria-label={isZh ? "审批反馈" : "Approval feedback"}
             value={feedback}
             onChange={(e) => setFeedback(e.target.value)}
             placeholder={isZh ? "附加反馈 / 重定向指令（可选）…" : "Feedback to redirect the agent (optional)…"}
@@ -705,6 +707,7 @@
           {dangerous && (
             <input
               type="text"
+              aria-label={isZh ? "高危确认" : "Dangerous confirmation"}
               value={confirmation}
               onChange={(e) => setConfirmation(e.target.value)}
               placeholder={isZh ? "输入 yes 确认高危操作" : "Type yes to confirm"}
@@ -1606,6 +1609,36 @@
       }
       return isZh ? "需要先完成配置" : "Configuration needed before first run";
     }
+
+    function shortcutAction(e) {
+      const key = String((e && e.key) || "").toLowerCase();
+      if (!key) return null;
+      const ctrl = !!(e && (e.ctrlKey || e.metaKey));
+      if (key === "f1") return "help";
+      if (key === "f2") return "settings";
+      if (ctrl && key === "p") return "command_palette";
+      if (e && e.metaKey && !e.ctrlKey && key === "k") return "command_palette";
+      if (ctrl && key === "b") return "toggle_sidebar";
+      if (ctrl && key === "o") return "toggle_files";
+      if (e && e.altKey && key === "j") return "review_next";
+      if (e && e.altKey && key === "k") return "review_previous";
+      if (e && e.altKey && key === "enter") return "review_toggle";
+      if (ctrl && key === "g") return "jump_report";
+      if (ctrl && key === "y") return "copy_report";
+      if (ctrl && key === ".") return "interrupt";
+      if (ctrl && key === "c") {
+        const hasSelection = !!(e && e.hasSelection);
+        return hasSelection ? "copy" : null;
+      }
+      return null;
+    }
+
+    function reconnectPlan(info) {
+      const lastEventId = (info && info.lastEventId) || 0;
+      const snapshotRequired = !!(info && info.snapshotRequired);
+      if (snapshotRequired) return { mode: "snapshot", lastEventId: 0 };
+      return { mode: "replay", lastEventId: lastEventId };
+    }
     /* FA_PURE_END */
 
     function OnboardingPanel({ data, isZh, onDismiss, onRecheck }) {
@@ -1695,6 +1728,8 @@
       // Layout & modals
       const [showLeftSidebar, setShowLeftSidebar] = useState(true);
       const [showRightSidebar, setShowRightSidebar] = useState(true);
+      const [mobileNavOpen, setMobileNavOpen] = useState(false);
+      const [mobilePanelsOpen, setMobilePanelsOpen] = useState(false);
       const [rightTab, setRightTab] = useState("files");
       const [planItems, setPlanItems] = useState([]);
       const [activityRecords, setActivityRecords] = useState([]);
@@ -1781,6 +1816,21 @@
         document.documentElement.classList.toggle("dark", isDark);
       }, [isDark]);
 
+      // Focus returns to the composer once every dialog closes
+      const anyDialogOpen = paletteOpen || helpOpen || isSettingsOpen || leftSession
+        || !!onboarding || isWorkspaceModalOpen || !!previewFile || !!inspectSession;
+      const composerFocusArmedRef = useRef(false);
+      useEffect(() => {
+        if (anyDialogOpen) {
+          composerFocusArmedRef.current = true;
+          return;
+        }
+        if (!composerFocusArmedRef.current) return;
+        composerFocusArmedRef.current = false;
+        const el = document.getElementById("fa-composer");
+        if (el) el.focus();
+      }, [anyDialogOpen]);
+
       // A named preset overrides the native light/dark stylesheet inline;
       // an empty name clears the overrides and returns to isDark.
       useEffect(() => {
@@ -1854,23 +1904,6 @@
           } catch {}
         })();
       }, [themePresets]);
-
-      useEffect(() => {
-        const onKey = (e) => {
-          if (e.key === "F2") {
-            e.preventDefault();
-            setIsSettingsOpen(true);
-            return;
-          }
-          const key = e.key.toLowerCase();
-          if ((e.ctrlKey && key === "p") || (e.metaKey && key === "k")) {
-            e.preventDefault();
-            setPaletteOpen(true);
-          }
-        };
-        window.addEventListener("keydown", onKey);
-        return () => window.removeEventListener("keydown", onKey);
-      }, []);
 
       const postSessionAction = async (action, args) => {
         return safeFetch("/api/actions", {
@@ -2167,6 +2200,8 @@
             es.onerror = () => setConnected(false);
 
             es.addEventListener("snapshot_required", async () => {
+              const plan = reconnectPlan({ lastEventId: sessionState.lastEventId, snapshotRequired: true });
+              if (plan.mode !== "snapshot") return;
               const snapRes = await safeFetch("/api/state");
               if (!snapRes || !snapRes.ok || cancelled) return;
               try { hydrate(await snapRes.json()); } catch {}
@@ -2651,35 +2686,52 @@
         [messages, transcriptFilter, transcriptQuery, visibleSourceIds],
       );
 
+      // One dispatcher for the whole capabilities.shortcuts vocabulary.
       useEffect(() => {
         const onKey = (e) => {
-          if (e.altKey && (e.key === "j" || e.key === "J")) {
-            e.preventDefault();
+          const hasSelection = !!(window.getSelection && String(window.getSelection()));
+          const action = shortcutAction({
+            key: e.key,
+            ctrlKey: e.ctrlKey,
+            metaKey: e.metaKey,
+            altKey: e.altKey,
+            hasSelection,
+          });
+          if (!action) return;
+          if (action === "copy") return; // browser default copies the selection
+          e.preventDefault();
+          if (action === "command_palette") { setPaletteOpen(true); return; }
+          if (action === "help") { setHelpOpen(true); return; }
+          if (action === "settings") { setIsSettingsOpen(true); return; }
+          if (action === "toggle_sidebar") { setShowLeftSidebar((v) => !v); return; }
+          if (action === "toggle_files") { setShowRightSidebar((v) => !v); return; }
+          if (action === "interrupt") { handleInterrupt(); return; }
+          if (action === "review_next" || action === "review_previous") {
             const list = visibleBlocks;
-            let idx = -1;
+            let idx = action === "review_next" ? -1 : list.length;
             for (let i = 0; i < list.length; i++) if (list[i].id === reviewId) idx = i;
-            const next = list[idx + 1] || list[0];
+            const next = action === "review_next"
+              ? (list[idx + 1] || list[0])
+              : (list[idx - 1] || list[list.length - 1]);
             if (next) setReviewId(next.id);
             return;
           }
-          if (e.altKey && (e.key === "k" || e.key === "K")) {
-            e.preventDefault();
-            const list = visibleBlocks;
-            let idx = list.length;
-            for (let i = 0; i < list.length; i++) if (list[i].id === reviewId) idx = i;
-            const next = list[idx - 1] || list[list.length - 1];
-            if (next) setReviewId(next.id);
+          if (action === "review_toggle") {
+            if (!reviewId) return;
+            const src = String(reviewId).split(":")[0];
+            const esc = (window.CSS && CSS.escape) ? CSS.escape : (s) => s;
+            const el = document.querySelector(`[data-block-id="${esc(reviewId)}"] button`)
+              || document.querySelector(`[data-block-id="${esc(src)}"] button`);
+            if (el) el.click();
             return;
           }
-          if (e.ctrlKey && (e.key === "g" || e.key === "G")) {
-            e.preventDefault();
+          if (action === "jump_report") {
             const jumped = withJumpToReport({ filter: transcriptFilter, blocks: transcriptBlocks });
             setTranscriptFilter(jumped.filter);
             setReviewId(jumped.reviewId);
             return;
           }
-          if (e.ctrlKey && (e.key === "y" || e.key === "Y")) {
-            e.preventDefault();
+          if (action === "copy_report") {
             const text = copyReportText(transcriptBlocks);
             if (text && navigator.clipboard) navigator.clipboard.writeText(text);
           }
@@ -2723,10 +2775,21 @@
       /* ═══════════════ RENDER ═══════════════ */
       return (
         <div className="flex h-screen w-screen overflow-hidden" style={{ backgroundColor: "var(--page)", color: "var(--ink)" }}>
+          {/* Below lg, the side columns become overlays: left drawer + right drawer/bottom sheet */}
+          {mobileNavOpen && (
+            <div className="fixed inset-0 z-30 bg-black/40 lg:hidden" onClick={() => setMobileNavOpen(false)} aria-hidden="true" />
+          )}
+          {mobilePanelsOpen && (
+            <div className="fixed inset-0 z-30 bg-black/40 lg:hidden" onClick={() => setMobilePanelsOpen(false)} aria-hidden="true" />
+          )}
+
           {/* ─────────── 1. LEFT SIDEBAR: workspaces & sessions ─────────── */}
           {showLeftSidebar && (
-            <aside className="flex w-60 shrink-0 select-none flex-col overflow-hidden border-r"
-                   style={{ backgroundColor: "var(--canvas)", borderColor: "var(--line)" }}>
+            <aside
+              className={`hidden shrink-0 select-none flex-col overflow-hidden border-r lg:flex lg:w-60 ${mobileNavOpen ? "fixed bottom-0 left-0 top-0 z-40 flex w-72" : ""}`}
+              style={{ backgroundColor: "var(--canvas)", borderColor: "var(--line)", boxShadow: mobileNavOpen ? "var(--shadow-overlay)" : undefined }}
+              aria-label={isZh ? "导航" : "Navigation"}
+            >
               <div className="flex items-center justify-between px-3 pb-1 pt-3">
                 <div className="flex items-center gap-2.5">
                   <div className="flex size-7 items-center justify-center rounded-lg border shadow-2xs shrink-0"
@@ -2884,6 +2947,16 @@
             <header className="flex h-12 shrink-0 items-center justify-between border-b px-4"
                     style={{ backgroundColor: "var(--surface)", borderColor: "var(--line)" }}>
               <div className="flex min-w-0 items-center gap-2.5">
+                <button
+                  type="button"
+                  aria-label={isZh ? "打开导航" : "Open navigation"}
+                  onClick={() => setMobileNavOpen(true)}
+                  className="cursor-pointer rounded-lg p-1.5 transition-colors duration-100 lg:hidden"
+                  style={{ color: "var(--ink-2)", background: "none", border: "none" }}
+                  title={isZh ? "导航" : "Navigation"}
+                >
+                  <Icons.sidebar />
+                </button>
                 {!showLeftSidebar && (
                   <div className="flex items-center gap-2">
                     <button
@@ -2929,6 +3002,16 @@
               </div>
 
               <div className="flex shrink-0 items-center gap-2">
+                <button
+                  type="button"
+                  aria-label={isZh ? "打开工作面板" : "Open work panels"}
+                  onClick={() => setMobilePanelsOpen(true)}
+                  className="cursor-pointer rounded-lg p-1.5 transition-colors duration-100 lg:hidden"
+                  style={{ color: "var(--ink-2)", background: "none", border: "none" }}
+                  title={isZh ? "计划 / 活动 / 文件 / Diff" : "Plan / Activity / Files / Diff"}
+                >
+                  <Icons.board />
+                </button>
                 {/* Status chip — time is visible */}
                 {isBusy ? (
                   <div className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11.5px] font-medium"
@@ -2938,10 +3021,11 @@
                     {runningElapsed != null && <span className="mono tabular-nums">· {fmtElapsed(runningElapsed)}</span>}
                     <button
                       type="button"
+                      aria-label={isZh ? "中断当前任务" : "Interrupt task"}
                       onClick={handleInterrupt}
                       className="ml-1 cursor-pointer rounded-full px-1.5 py-px text-[10.5px] font-medium"
                       style={{ backgroundColor: "var(--red-tint)", color: "var(--red)", border: "none" }}
-                      title={isZh ? "中断当前任务" : "Interrupt task"}
+                      title={isZh ? "中断当前任务 (Ctrl-.)" : "Interrupt task (Ctrl-.)"}
                     >
                       {isZh ? "停止" : "Stop"}
                     </button>
@@ -3260,6 +3344,8 @@
                       )}
                       <textarea
                         rows="2"
+                        id="fa-composer"
+                        aria-label={isZh ? "任务输入框" : "Task composer"}
                         value={inputPrompt}
                         onChange={(e) => setInputPrompt(e.target.value)}
                         onDragOver={(e) => e.preventDefault()}
@@ -3348,6 +3434,7 @@
                           />
                           <button
                             type="button"
+                            aria-label={isZh ? "添加附件" : "Attach files"}
                             onClick={() => fileInputRef.current && fileInputRef.current.click()}
                             className="cursor-pointer rounded-lg p-1.5"
                             style={{ background: "none", border: "none", color: "var(--ink-3)" }}
@@ -3359,6 +3446,7 @@
                             <button
                               type="button"
                               onClick={handleInterrupt}
+                              aria-label={isZh ? "中断当前任务" : "Interrupt the running task"}
                               className="flex cursor-pointer items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11.5px] font-medium transition-colors duration-100"
                               style={{ backgroundColor: "var(--red-tint)", color: "var(--red)", border: "none" }}
                               title={isZh ? "中断当前任务" : "Interrupt the running task"}
@@ -3391,8 +3479,27 @@
 
               {/* ─────────── 3. RIGHT PANEL: board / outputs / team / status ─────────── */}
               {showRightSidebar && (
-                <aside className="hidden w-80 select-none flex-col overflow-hidden border-l lg:flex"
-                       style={{ backgroundColor: "var(--surface)", borderColor: "var(--line)" }}>
+                <aside
+                  className={`hidden select-none flex-col overflow-hidden border-l lg:static lg:flex lg:w-80 ${mobilePanelsOpen ? "fixed inset-x-0 bottom-0 z-40 flex h-[62vh] rounded-t-[14px] md:inset-x-auto md:top-0 md:right-0 md:h-auto md:w-80 md:rounded-none lg:inset-auto lg:h-auto lg:rounded-none" : ""}`}
+                  style={{ backgroundColor: "var(--surface)", borderColor: "var(--line)", boxShadow: mobilePanelsOpen ? "var(--shadow-overlay)" : undefined }}
+                  aria-label={isZh ? "工作面板" : "Work panels"}
+                >
+                  {mobilePanelsOpen && (
+                    <div className="flex items-center justify-between px-3 pb-1 pt-2 lg:hidden">
+                      <span className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: "var(--ink-3)" }}>
+                        {isZh ? "面板" : "Panels"}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label={isZh ? "关闭面板" : "Close panels"}
+                        onClick={() => setMobilePanelsOpen(false)}
+                        className="cursor-pointer rounded-lg p-1.5"
+                        style={{ color: "var(--ink-3)", background: "none", border: "none" }}
+                      >
+                        <Icons.close />
+                      </button>
+                    </div>
+                  )}
                   <div className="flex gap-0.5 p-1" style={{ backgroundColor: "var(--field)" }}>
                     {[
                       { key: "plan", label: isZh ? "计划" : "Plan", icon: Icons.board, badge: (planItems.length || boardCounts.total) ? `${planItems.filter((i) => i.status === "completed" || i.status === "resolved").length || boardCounts.resolved}/${planItems.length || boardCounts.total}` : null },
@@ -3403,6 +3510,7 @@
                       <button
                         key={t.key}
                         type="button"
+                        aria-label={t.label}
                         onClick={() => setRightTab(t.key)}
                         className="flex flex-1 cursor-pointer items-center justify-center gap-1 rounded-md py-1.5 text-[11px] transition-colors duration-100"
                         style={{
@@ -3772,6 +3880,7 @@
               <div className="anim-pop-in w-full max-w-lg overflow-hidden rounded-[10px]" style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-overlay)" }} onClick={(e) => e.stopPropagation()}>
                 <input
                   autoFocus
+                  aria-label={isZh ? "命令面板" : "Command palette"}
                   value={paletteQuery}
                   onChange={(e) => setPaletteQuery(e.target.value)}
                   placeholder={isZh ? "搜索命令…" : "Search commands…"}
