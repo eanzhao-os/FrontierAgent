@@ -14,11 +14,11 @@ import os
 from pathlib import Path
 from typing import Any
 
+from apodex.commands import CommandSpec, get_command
 from apodex.config import (
     ModelConfig,
     RuntimeConfigStatus,
     format_preflight_errors,
-    format_runtime_config_status,
 )
 from apodex.llm import build_llm
 from apodex.middleware import (
@@ -28,7 +28,6 @@ from apodex.middleware import (
     _wrap_skills_llm,
 )
 from apodex.observers import Approver
-from apodex.commands import get_command
 from apodex.profiles import get_profile, profile_names, terminal_mode_names
 from apodex.render import Renderer
 from apodex.session_actions import SessionActions
@@ -818,7 +817,7 @@ class TerminalSession(TaskRunnerMixin):
             return False
         return await self._slash_presentation(spec, arg)
 
-    async def _slash_presentation(self, spec, arg: str) -> bool:
+    async def _slash_presentation(self, spec: CommandSpec, arg: str) -> bool:
         if spec.name == "/help":
             self.r.note(_HELP.format(modes=" | ".join(terminal_mode_names())))
             return False

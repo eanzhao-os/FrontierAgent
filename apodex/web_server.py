@@ -13,11 +13,11 @@ import json
 import logging
 import os
 import shutil
-import sys
 import tempfile
 import time
+from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Annotated, Any
 
 from dotenv import find_dotenv, load_dotenv
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -26,15 +26,15 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-STATIC_DIR = Path(__file__).resolve().parent / "web_static"
-
 from apodex.cli import apply_model_overrides, publish_model_overrides
 from apodex.commands import capabilities_payload
-from apodex.profiles import get_profile, profile_names, terminal_mode_names
+from apodex.profiles import get_profile, terminal_mode_names
 from apodex.session import TerminalSession, new_session_id
-from apodex.session_actions import ActionResult, HTTP_STATUS, SessionActions
+from apodex.session_actions import HTTP_STATUS, ActionResult, SessionActions
 from apodex.session_snapshot import build_session_snapshot, transcript_page
 from apodex.web_observer import EventBroadcaster, WebApprover, WebEvent, WebRenderer
+
+STATIC_DIR = Path(__file__).resolve().parent / "web_static"
 
 # Load environment variables
 load_dotenv(".env", override=False)
@@ -118,7 +118,7 @@ app.add_middleware(
 
 class RunRequest(BaseModel):
     prompt: str
-    mode: Optional[str] = None
+    mode: str | None = None
 
 
 class ModeRequest(BaseModel):
@@ -165,20 +165,20 @@ _WORKSPACE_SEARCH_LIMIT = 20_000
 class WebAgentManager:
     BUSY_ALLOWED = frozenset({"steer", "interrupt", "approve"})
 
-    def __init__(self, initial_mode: str = "react", cwd: Optional[str] = None) -> None:
+    def __init__(self, initial_mode: str = "react", cwd: str | None = None) -> None:
         self.cwd = os.path.abspath(cwd or os.getcwd())
         self.mode = initial_mode if initial_mode in terminal_mode_names() else "react"
         self.broadcaster = EventBroadcaster()
         self.approver = WebApprover(self.broadcaster)
         self.renderer = WebRenderer(self.broadcaster)
-        self.active_task: Optional[asyncio.Task[None]] = None
+        self.active_task: asyncio.Task[None] | None = None
         self.is_running = False
-        self.session: Optional[TerminalSession] = None
+        self.session: TerminalSession | None = None
         self.revision = 0
         self._lock = asyncio.Lock()
         self._init_session(self.mode)
 
-    def _init_session(self, mode: str, session_id: Optional[str] = None) -> None:
+    def _init_session(self, mode: str, session_id: str | None = None) -> None:
         from apodex.native import prepare_native_runtime
         from apodex.sandbox import NATIVE, Strategy, set_active_strategy
 
@@ -213,7 +213,7 @@ class WebAgentManager:
             raise RuntimeError("Cannot switch mode while a task is running.")
         self._init_session(new_mode)
 
-    async def run(self, prompt: str, mode: Optional[str] = None) -> None:
+    async def run(self, prompt: str, mode: str | None = None) -> None:
         if self.is_running:
             raise RuntimeError("Agent is already busy running a task.")
         if mode and mode != self.mode:
@@ -221,6 +221,7 @@ class WebAgentManager:
 
         if not self.session:
             self._init_session(self.mode)
+        assert self.session is not None
 
         self.is_running = True
         await self.broadcaster.emit(
@@ -274,7 +275,7 @@ class WebAgentManager:
 
 
 # Global manager instance
-manager: Optional[WebAgentManager] = None
+manager: WebAgentManager | None = None
 
 
 def get_manager() -> WebAgentManager:
@@ -525,7 +526,7 @@ async def attach_host_paths(req: AttachPathRequest) -> dict[str, Any]:
         try:
             added = mgr.session.attachments.attach_many(req.paths)
         except Exception as exc:
-            raise ApiError("validation", str(exc))
+            raise ApiError("validation", str(exc)) from exc
         mgr.revision += 1
         return {
             "status": "ok",
@@ -534,7 +535,7 @@ async def attach_host_paths(req: AttachPathRequest) -> dict[str, Any]:
 
 
 @app.post("/api/attachments/upload")
-async def upload_attachments(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+async def upload_attachments(files: Annotated[list[UploadFile], File()]) -> dict[str, Any]:
     mgr = get_manager()
     max_file, max_request = _upload_byte_limits()
     total = 0
@@ -703,7 +704,7 @@ async def set_mode(req: ModeRequest) -> dict[str, Any]:
         await mgr.broadcaster.emit("mode_changed", {"mode": mgr.mode})
         return {"status": "ok", "mode": mgr.mode}
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/run")
@@ -715,7 +716,7 @@ async def run_task(req: RunRequest) -> dict[str, Any]:
         await mgr.run(req.prompt, req.mode)
         return {"status": "started", "mode": mgr.mode}
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.post("/api/steer")
@@ -813,7 +814,7 @@ async def stream_events(request: Request) -> EventSourceResponse:
                             ensure_ascii=False,
                         ),
                     }
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # Keep-alive ping
                     yield {"event": "ping", "data": "{}"}
         finally:
@@ -839,7 +840,7 @@ async def get_history() -> dict[str, Any]:
     return {
         "display_history": mgr.session.display_history,
         "workflow_turns": [
-            dataclasses.asdict(turn) if hasattr(turn, "__dataclass_fields__") else turn
+            dataclasses.asdict(turn) if dataclasses.is_dataclass(turn) else turn
             for turn in mgr.session.workflow_turns
         ],
     }
@@ -861,14 +862,14 @@ async def get_diff() -> dict[str, Any]:
     }
 
 
-def normalize_session_id(sid: Optional[str]) -> Optional[str]:
+def normalize_session_id(sid: str | None) -> str | None:
     if not sid:
         return None
     return sid.strip().replace(" ", "+")
 
 
 @app.get("/api/artifacts")
-async def list_artifacts(session_id: Optional[str] = None) -> dict[str, Any]:
+async def list_artifacts(session_id: str | None = None) -> dict[str, Any]:
     from apodex.session_state import discover_all_run_roots, load_session_state
 
     mgr = get_manager()
@@ -962,7 +963,7 @@ async def read_file_content(path: str) -> dict[str, Any]:
             "size": file_path.stat().st_size,
         }
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not read file: {exc}")
+        raise HTTPException(status_code=500, detail=f"Could not read file: {exc}") from exc
 
 
 @app.get("/api/preview")
@@ -1188,7 +1189,7 @@ async def add_workspace(req: WorkspaceRequest) -> dict[str, Any]:
         try:
             p.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"Cannot create directory: {exc}")
+            raise HTTPException(status_code=400, detail=f"Cannot create directory: {exc}") from exc
 
     add_workspace_path(str(p))
     mgr = get_manager()
@@ -1227,6 +1228,7 @@ async def select_active_workspace(req: WorkspaceRequest) -> dict[str, Any]:
     add_workspace_path(str(p))
     mgr.cwd = str(p)
     mgr._init_session(mgr.mode)
+    assert mgr.session is not None
     await mgr.broadcaster.emit("workspace_changed", {"cwd": mgr.cwd, "session_id": mgr.session.session_id})
     return {"status": "ok", "cwd": mgr.cwd, "session_id": mgr.session.session_id}
 
@@ -1244,7 +1246,7 @@ async def get_all_work_files() -> dict[str, Any]:
         state = load_session_state(sid) or {}
         journal = state.get("journal") or {}
         if isinstance(journal, dict):
-            for fpath in journal.keys():
+            for fpath in journal:
                 all_files.append({
                     "session_id": sid,
                     "file": fpath,

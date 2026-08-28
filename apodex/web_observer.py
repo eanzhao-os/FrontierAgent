@@ -192,6 +192,7 @@ class WebRenderer(Renderer):
         self.broadcaster = broadcaster
         self._current_thinking = ""
         self._current_content = ""
+        self._emit_tasks: set[asyncio.Task[Any]] = set()
         self.phase = "idle"
         self.queued_count = 0
         self.tool_count = 0
@@ -221,9 +222,9 @@ class WebRenderer(Renderer):
     def _sync_emit(self, event_type: str, data: dict[str, Any]) -> None:
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self.broadcaster.emit(event_type, data))
         except RuntimeError:
-            pass
+            return
+        self._emit_tasks.add(loop.create_task(self.broadcaster.emit(event_type, data)))
 
     def _set_phase(self, phase: str, *, tool: str | None = None) -> None:
         changed = self.phase != phase
@@ -261,20 +262,20 @@ class WebRenderer(Renderer):
     def working_off(self) -> None:
         return
 
-    def thinking_delta(self, delta: str) -> None:
-        self._current_thinking += delta
+    def thinking_delta(self, s: str) -> None:
+        self._current_thinking += s
         self._set_phase("thinking")
-        self._sync_emit("thinking_delta", {"delta": delta, "accumulated": self._current_thinking})
+        self._sync_emit("thinking_delta", {"delta": s, "accumulated": self._current_thinking})
 
-    def content_delta(self, delta: str) -> None:
-        self._current_content += delta
+    def content_delta(self, s: str) -> None:
+        self._current_content += s
         self._set_phase("responding")
-        self._sync_emit("content_delta", {"delta": delta, "accumulated": self._current_content})
+        self._sync_emit("content_delta", {"delta": s, "accumulated": self._current_content})
 
-    def turn_text_fallback(self, text: str, thinking: str = "") -> None:
-        self._current_content = text
+    def turn_text_fallback(self, ai_text: str, thinking: str) -> None:
+        self._current_content = ai_text
         self._current_thinking = thinking
-        self._sync_emit("turn_fallback", {"text": text, "thinking": thinking})
+        self._sync_emit("turn_fallback", {"text": ai_text, "thinking": thinking})
 
     def end_turn_text(self) -> None:
         self._sync_emit(
@@ -400,15 +401,15 @@ class WebRenderer(Renderer):
             {"message": msg, "configuration_error": configuration_error},
         )
 
-    def diff_preview(self, diff: str, *, stats: Any = None) -> None:
-        self._sync_emit("diff_preview", {"diff": diff, "stats": str(stats) if stats else ""})
+    def diff_preview(self, diff_text: str, *, stats: tuple[int, int] | None = None) -> None:
+        self._sync_emit("diff_preview", {"diff": diff_text, "stats": str(stats) if stats else ""})
 
-    def note(self, text: str) -> None:
-        self._sync_emit("note", {"text": text})
+    def note(self, msg: str) -> None:
+        self._sync_emit("note", {"text": msg})
 
-    def error(self, text: str) -> None:
+    def error(self, msg: str) -> None:
         self._set_phase("error")
-        self._sync_emit("error", {"message": text})
+        self._sync_emit("error", {"message": msg})
 
     def final(self, text: str, *, turns: int = 0, tool_calls: int = 0, stopped_by: str = "") -> None:
         self._set_phase("done")

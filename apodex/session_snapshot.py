@@ -82,7 +82,9 @@ def _usage_dict(session: Any) -> dict[str, Any]:
         return {}
     to_dict = getattr(usage, "to_dict", None)
     if callable(to_dict):
-        return to_dict()
+        as_dict = to_dict()
+        if isinstance(as_dict, dict):
+            return as_dict
     return {
         "input": getattr(usage, "input", 0),
         "output": getattr(usage, "output", 0),

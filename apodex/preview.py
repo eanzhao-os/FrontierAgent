@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from typing import Any
@@ -222,10 +223,8 @@ def _preview_pdb(path: Path, *, max_bytes: int) -> dict[str, Any]:
             chain_id = line[21:22].strip()
             if chain_id:
                 chains.add(chain_id)
-            try:
+            with contextlib.suppress(ValueError):
                 b_factors.append(float(line[60:66].strip()))
-            except ValueError:
-                pass
     parts = [f"🧬 PDB Biological Structure · {path.name}", "─" * 45]
     if header:
         parts.append(f"Header: {header}")
