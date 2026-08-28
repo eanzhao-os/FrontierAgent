@@ -97,3 +97,129 @@ def test_snapshot_or_replay_reports_gap(web_manager):
     bus._history.clear()
     bus._sequence = 5
     assert snapshot_or_replay(bus, last_id=1) == "snapshot_required"
+
+
+def test_resolve_dangerous_rejects_without_yes():
+    import asyncio
+
+    from apodex.web_observer import EventBroadcaster, WebApprover
+
+    bus = EventBroadcaster()
+    approver = WebApprover(bus)
+
+    async def body():
+        task = asyncio.create_task(approver.confirm("bash", "rm", "destroy", dangerous="delete"))
+        await asyncio.sleep(0)
+        appr_id = next(iter(approver._pending))
+        assert approver.resolve(appr_id, decision="approve", confirmation="") is False
+        ok = approver.resolve(appr_id, decision="approve", confirmation="yes")
+        assert ok is True
+        decision = await task
+        assert decision.approved is True
+
+    asyncio.run(body())
+
+
+def test_redirect_sets_feedback_and_rejects():
+    import asyncio
+
+    from apodex.web_observer import EventBroadcaster, WebApprover
+
+    bus = EventBroadcaster()
+    approver = WebApprover(bus)
+
+    async def body():
+        task = asyncio.create_task(approver.confirm("bash", "ls", "run"))
+        await asyncio.sleep(0)
+        appr_id = next(iter(approver._pending))
+        assert approver.resolve(appr_id, decision="redirect", feedback="use python")
+        decision = await task
+        assert decision.approved is False
+        assert decision.feedback == "use python"
+
+    asyncio.run(body())
+
+
+def test_always_allow_sets_remember():
+    import asyncio
+
+    from apodex.web_observer import EventBroadcaster, WebApprover
+
+    bus = EventBroadcaster()
+    approver = WebApprover(bus)
+
+    async def body():
+        task = asyncio.create_task(approver.confirm("bash", "ls", "run"))
+        await asyncio.sleep(0)
+        appr_id = next(iter(approver._pending))
+        assert approver.resolve(appr_id, decision="always_allow")
+        decision = await task
+        assert decision.approved is True and decision.remember is True
+
+    asyncio.run(body())
+
+
+def test_allow_session_flips_auto_approve():
+    import asyncio
+
+    from apodex.web_observer import EventBroadcaster, WebApprover
+
+    bus = EventBroadcaster()
+    approver = WebApprover(bus)
+
+    async def body():
+        task = asyncio.create_task(approver.confirm("bash", "ls", "run"))
+        await asyncio.sleep(0)
+        appr_id = next(iter(approver._pending))
+        assert approver.resolve(appr_id, decision="allow_session")
+        decision = await task
+        assert decision.approved is True
+        assert approver.auto_approve is True
+
+    asyncio.run(body())
+
+
+def test_auto_for_me_flips_flag():
+    import asyncio
+
+    from apodex.web_observer import EventBroadcaster, WebApprover
+
+    bus = EventBroadcaster()
+    approver = WebApprover(bus)
+
+    async def body():
+        task = asyncio.create_task(approver.confirm("bash", "ls", "run"))
+        await asyncio.sleep(0)
+        appr_id = next(iter(approver._pending))
+        assert approver.resolve(appr_id, decision="auto_for_me")
+        decision = await task
+        assert decision.approved is True
+        assert approver.auto_for_me is True
+
+    asyncio.run(body())
+
+
+def test_approve_route_dangerous_confirmation(web_client, web_manager):
+    import asyncio
+
+    async def body():
+        task = asyncio.create_task(
+            web_manager.approver.confirm("bash", "rm", "destroy", dangerous="delete")
+        )
+        await asyncio.sleep(0)
+        appr_id = next(iter(web_manager.approver._pending))
+        denied = web_client.post(
+            "/api/approve",
+            json={"id": appr_id, "decision": "approve", "confirmation": ""},
+        )
+        assert denied.status_code == 400
+        assert denied.json()["code"] == "dangerous_confirmation"
+        ok = web_client.post(
+            "/api/approve",
+            json={"id": appr_id, "decision": "approve", "confirmation": "yes"},
+        )
+        assert ok.status_code == 200
+        decision = await task
+        assert decision.approved is True
+
+    asyncio.run(body())

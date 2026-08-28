@@ -125,10 +125,9 @@ class WorkspaceRequest(BaseModel):
 
 class ApproveRequest(BaseModel):
     id: str
-    approved: bool
+    decision: str
     feedback: str = ""
-    remember: bool = False
-    auto_all: bool = False
+    confirmation: str = ""
 
 
 class SteerRequest(BaseModel):
@@ -370,20 +369,38 @@ async def steer_task(req: SteerRequest) -> dict[str, Any]:
 @app.post("/api/approve")
 async def approve_tool(req: ApproveRequest) -> dict[str, Any]:
     mgr = get_manager()
+    allowed = {
+        "approve",
+        "reject",
+        "redirect",
+        "auto_for_me",
+        "allow_session",
+        "always_allow",
+    }
+    if req.decision not in allowed:
+        raise ApiError("validation", f"unknown decision '{req.decision}'")
+    fut = mgr.approver._pending.get(req.id)
+    if fut is None:
+        raise ApiError("not_found", "Pending approval not found or expired.")
+    if fut.done():
+        raise ApiError("busy", "Approval already resolved.")
+    info = mgr.approver._pending_info.get(req.id) or {}
+    dangerous = str(info.get("dangerous") or "").strip()
+    if req.decision == "approve" and dangerous and req.confirmation != "yes":
+        raise ApiError("dangerous_confirmation", "Type yes to confirm this dangerous action.")
     resolved = mgr.approver.resolve(
         req.id,
-        approved=req.approved,
+        decision=req.decision,
         feedback=req.feedback,
-        remember=req.remember,
-        auto_all=req.auto_all,
+        confirmation=req.confirmation,
     )
     if resolved:
         await mgr.broadcaster.emit(
             "approval_resolved",
-            {"id": req.id, "approved": req.approved, "feedback": req.feedback},
+            {"id": req.id, "decision": req.decision, "feedback": req.feedback},
         )
         return {"status": "ok", "resolved": True}
-    raise HTTPException(status_code=404, detail="Pending approval not found or expired.")
+    raise ApiError("not_found", "Pending approval not found or expired.")
 
 
 @app.post("/api/interrupt")

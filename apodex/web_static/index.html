@@ -637,6 +637,21 @@
     /* ── Approval card: one question, visible preview, explicit submit ── */
     function ApprovalCard({ approval, feedback, setFeedback, onResolve, isZh }) {
       const dangerous = !!(approval.dangerous && String(approval.dangerous).trim());
+      const [confirmation, setConfirmation] = useState("");
+      const approveEnabled = !dangerous || confirmation === "yes";
+      const redirectEnabled = !!(feedback && String(feedback).trim());
+      const btn = (label, decision, extra) => (
+        <button
+          type="button"
+          autoFocus={decision === "reject"}
+          disabled={extra && extra.disabled}
+          onClick={() => onResolve(decision, confirmation)}
+          className="cursor-pointer rounded-lg px-3.5 py-1.5 text-[12px] font-medium transition-colors duration-100 disabled:cursor-not-allowed disabled:opacity-40"
+          style={extra && extra.style ? extra.style : { backgroundColor: "var(--surface)", boxShadow: "var(--shadow-btn)", color: "var(--ink-2)", border: "none" }}
+        >
+          {label}
+        </button>
+      );
       return (
         <div className="anim-pop-in flex flex-col gap-3 rounded-[10px] p-4"
              style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-raised)" }}>
@@ -687,33 +702,27 @@
             className="w-full rounded-lg px-3 py-2 text-[12.5px] outline-none"
             style={{ backgroundColor: "var(--field)", boxShadow: "var(--shadow-inset-field)", color: "var(--ink)", border: "none" }}
           />
+          {dangerous && (
+            <input
+              type="text"
+              value={confirmation}
+              onChange={(e) => setConfirmation(e.target.value)}
+              placeholder={isZh ? "输入 yes 确认高危操作" : "Type yes to confirm"}
+              className="w-full rounded-lg px-3 py-2 text-[12.5px] outline-none"
+              style={{ backgroundColor: "var(--field)", boxShadow: "var(--shadow-inset-field)", color: "var(--ink)", border: "none" }}
+            />
+          )}
 
           <div className="flex flex-wrap justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => onResolve(false, false)}
-              className="cursor-pointer rounded-lg px-3.5 py-1.5 text-[12px] font-medium transition-colors duration-100"
-              style={{ backgroundColor: "var(--red-tint)", color: "var(--red)", border: "none" }}
-            >
-              {isZh ? "拒绝" : "Reject"}
-            </button>
-            <button
-              type="button"
-              onClick={() => onResolve(true, true)}
-              className="cursor-pointer rounded-lg px-3.5 py-1.5 text-[12px] font-medium transition-colors duration-100"
-              style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-btn)", color: "var(--ink-2)", border: "none" }}
-              title={isZh ? "本次任务内不再询问" : "Auto-approve for the rest of this task"}
-            >
-              {isZh ? "始终允许" : "Always allow"}
-            </button>
-            <button
-              type="button"
-              onClick={() => onResolve(true, false)}
-              className="cursor-pointer rounded-lg px-4 py-1.5 text-[12px] font-medium text-white transition-all duration-100 hover:brightness-110"
-              style={{ backgroundColor: "var(--accent)", border: "none" }}
-            >
-              {isZh ? "批准" : "Approve"}
-            </button>
+            {btn(isZh ? "拒绝" : "Reject", "reject", { style: { backgroundColor: "var(--red-tint)", color: "var(--red)", border: "none" } })}
+            {btn(isZh ? "重定向" : "Redirect", "redirect", { disabled: !redirectEnabled })}
+            {btn(isZh ? "对我自动批准" : "Auto for me", "auto_for_me")}
+            {btn(isZh ? "本会话允许" : "Allow session", "allow_session")}
+            {btn(isZh ? "始终允许" : "Always allow", "always_allow")}
+            {btn(isZh ? "批准" : "Approve", "approve", {
+              disabled: !approveEnabled,
+              style: { backgroundColor: "var(--accent)", color: "#fff", border: "none" },
+            })}
           </div>
         </div>
       );
@@ -1813,12 +1822,17 @@
         });
       };
 
-      const handleApproval = async (approved, autoAll = false) => {
+      const handleApproval = async (decision, confirmation = "") => {
         if (!pendingApproval) return;
         await safeFetch("/api/approve", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ id: pendingApproval.id, approved, feedback: feedbackText, auto_all: autoAll }),
+          body: JSON.stringify({
+            id: pendingApproval.id,
+            decision,
+            feedback: feedbackText,
+            confirmation,
+          }),
         });
         setPendingApproval(null);
         setFeedbackText("");

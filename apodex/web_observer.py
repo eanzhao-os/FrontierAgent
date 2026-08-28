@@ -188,16 +188,23 @@ class WebApprover:
         self,
         approval_id: str,
         *,
-        approved: bool,
+        decision: str,
         feedback: str = "",
-        remember: bool = False,
-        auto_all: bool = False,
+        confirmation: str = "",
     ) -> bool:
         fut = self._pending.get(approval_id)
         if fut is None or fut.done():
             return False
-        if auto_all:
+        info = self._pending_info.get(approval_id) or {}
+        dangerous = str(info.get("dangerous") or "").strip()
+        if decision == "approve" and dangerous and confirmation != "yes":
+            return False
+        approved = decision in {"approve", "auto_for_me", "allow_session", "always_allow"}
+        remember = decision == "always_allow"
+        if decision == "allow_session":
             self.auto_approve = True
+        if decision == "auto_for_me":
+            self.auto_for_me = True
         fut.set_result(Decision(approved=approved, feedback=feedback, remember=remember))
         return True
 

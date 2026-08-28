@@ -19,6 +19,7 @@ HTTP_STATUS = {
     "validation": 400,
     "not_found": 404,
     "revision_conflict": 409,
+    "dangerous_confirmation": 400,
 }
 
 
