@@ -1338,6 +1338,43 @@
           forgotten[data.id] = true;
           next.forgottenApprovalIds = forgotten;
         }
+      } else if (type === "todos") {
+        next.plan = Object.assign({}, state.plan || {}, { items: data.items || [] });
+      } else if (type === "plan") {
+        next.plan = Object.assign({}, state.plan || {}, { items: data.items || [] });
+      } else if (type === "activity_call") {
+        const records = ((state.activity && state.activity.records) || []).concat([{
+          call_id: data.call_id,
+          name: data.name,
+          args: data.args || {},
+          state: "running",
+        }]);
+        next.activity = Object.assign({}, state.activity || {}, { records: records });
+      } else if (type === "activity_result") {
+        const records = ((state.activity && state.activity.records) || []).map((row) => {
+          if (row.call_id !== data.call_id) return row;
+          const copy = Object.assign({}, row);
+          copy.state = data.state || (data.is_error ? "failed" : "success");
+          copy.result = data.result;
+          copy.ms = data.ms;
+          return copy;
+        });
+        next.activity = Object.assign({}, state.activity || {}, { records: records });
+      } else if (type === "presentation") {
+        next.presentation = Object.assign({}, state.presentation || {}, data);
+        if (data.phase === "interrupted") {
+          const records = ((state.activity && state.activity.records) || []).map((row) => {
+            if (row.state !== "running") return row;
+            const copy = Object.assign({}, row);
+            copy.state = "interrupted";
+            return copy;
+          });
+          next.activity = Object.assign({}, state.activity || {}, { records: records });
+        }
+      } else if (type === "subagent_status") {
+        next.activity = Object.assign({}, state.activity || {}, { subagents: data.snapshots || data.subagents || [] });
+      } else if (type === "task_started") {
+        next.plan = { items: [], summary: "" };
       }
       return next;
     }
@@ -1568,7 +1605,9 @@
       // Layout & modals
       const [showLeftSidebar, setShowLeftSidebar] = useState(true);
       const [showRightSidebar, setShowRightSidebar] = useState(true);
-      const [rightTab, setRightTab] = useState("outputs");
+      const [rightTab, setRightTab] = useState("files");
+      const [planItems, setPlanItems] = useState([]);
+      const [activityRecords, setActivityRecords] = useState([]);
       const [isWorkspaceModalOpen, setIsWorkspaceModalOpen] = useState(false);
       const [isSettingsOpen, setIsSettingsOpen] = useState(false);
       const [commands, setCommands] = useState([]);
@@ -1949,6 +1988,11 @@
                       timestamp: payload.timestamp,
                     });
                     if (name === "approval_required" && sessionState.pending_approval === prevPending) return;
+                    if (sessionState.plan) setPlanItems(sessionState.plan.items || []);
+                    if (sessionState.activity) {
+                      setActivityRecords(sessionState.activity.records || []);
+                      if (sessionState.activity.subagents) setSubagents(sessionState.activity.subagents);
+                    }
                   } catch {}
                 }
                 fn(e);
@@ -3170,11 +3214,11 @@
                        style={{ backgroundColor: "var(--surface)", borderColor: "var(--line)" }}>
                   <div className="flex gap-0.5 p-1" style={{ backgroundColor: "var(--field)" }}>
                     {[
-                      { key: "board", label: isZh ? "看板" : "Board", icon: Icons.board, badge: boardCounts.total > 0 ? `${boardCounts.resolved}/${boardCounts.active}` : null },
-                      { key: "outputs", label: isZh ? "产物" : "Outputs", icon: Icons.boxes, badge: artifacts.length > 0 ? String(artifacts.length) : null },
-                      { key: "team", label: isZh ? "团队" : "Team", icon: Icons.users, badge: subagents.length > 0 ? String(subagents.length) : null },
-                      { key: "status", label: isZh ? "状态" : "Status", icon: Icons.terminal, badge: null },
-                    ].map((t) => (
+                      { key: "plan", label: isZh ? "计划" : "Plan", icon: Icons.board, badge: (planItems.length || boardCounts.total) ? `${planItems.filter((i) => i.status === "completed" || i.status === "resolved").length || boardCounts.resolved}/${planItems.length || boardCounts.total}` : null },
+                      { key: "activity", label: isZh ? "活动" : "Activity", icon: Icons.terminal, badge: (activityRecords.length || subagents.length) ? String(activityRecords.length || subagents.length) : null },
+                      { key: "files", label: isZh ? "文件" : "Files", icon: Icons.boxes, badge: artifacts.length > 0 ? String(artifacts.length) : null },
+                      { key: "diff", label: "Diff", icon: Icons.board, badge: null, hide: !(diffStats && Object.keys(diffStats).length) },
+                    ].filter((t) => !t.hide).map((t) => (
                       <button
                         key={t.key}
                         type="button"
@@ -3197,7 +3241,7 @@
 
                   <div className="flex-1 space-y-4 overflow-y-auto p-4">
                     {/* ── Task board — the Agent Team centerpiece (ReAct plans land here too) ── */}
-                    {rightTab === "board" && (
+                    {(rightTab === "plan" || rightTab === "board") && (
                       <div className="space-y-3">
                         <div className="flex items-center justify-between">
                           <h4 className="text-[11.5px] font-semibold uppercase tracking-wider" style={{ color: "var(--ink-3)" }}>
@@ -3270,7 +3314,7 @@
                     )}
 
                     {/* ── Outputs: sandbox semantics made visible ── */}
-                    {rightTab === "outputs" && (
+                    {(rightTab === "files" || rightTab === "outputs") && (
                       <div className="space-y-4">
                         <div className="flex items-center justify-between">
                           <h4 className="text-[11.5px] font-semibold uppercase tracking-wider" style={{ color: "var(--ink-3)" }}>
@@ -3362,10 +3406,27 @@
                     )}
 
                     {/* ── Team: real subagent snapshots only ── */}
-                    {rightTab === "team" && (
+                    {(rightTab === "activity" || rightTab === "team") && (
                       <div className="space-y-3">
                         <h4 className="text-[11.5px] font-semibold uppercase tracking-wider" style={{ color: "var(--ink-3)" }}>
-                          {isZh ? "子 Agent 协作树" : "Sub-agent tree"}
+                          {isZh ? "活动" : "Activity"}
+                        </h4>
+                        {activityRecords.length === 0 ? (
+                          <div className="rounded-[10px] p-3 text-[12px]" style={{ backgroundColor: "var(--inset)", color: "var(--ink-3)" }}>
+                            {isZh ? "工具调用将显示在这里" : "Tool calls appear here"}
+                          </div>
+                        ) : activityRecords.map((row) => (
+                          <div key={row.call_id || row.name} className="rounded-[10px] p-3 text-[12px]" style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-card)" }}>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="mono font-semibold" style={{ color: "var(--ink)" }}>{row.name}</span>
+                              <span className="text-[10.5px]" style={{ color: "var(--ink-3)" }}>{row.state}</span>
+                            </div>
+                            {row.call_id && <div className="mono text-[10px]" style={{ color: "var(--ink-3)" }}>{row.call_id}</div>}
+                            {row.ms != null && <div className="text-[10.5px]" style={{ color: "var(--ink-3)" }}>{row.ms} ms</div>}
+                          </div>
+                        ))}
+                        <h4 className="text-[11.5px] font-semibold uppercase tracking-wider" style={{ color: "var(--ink-3)" }}>
+                          {isZh ? "子 Agent" : "Sub-agents"}
                         </h4>
                         {subagents.length === 0 ? (
                           <div className="rounded-[10px] p-4 text-center text-[12px] leading-relaxed"

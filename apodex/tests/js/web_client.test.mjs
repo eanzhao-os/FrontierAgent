@@ -82,3 +82,23 @@ describe("transcript", () => {
   });
 });
 
+describe("plan and activity", () => {
+  it("projects react todos and team board", () => {
+    const { applyEvent, initialSessionState } = loadPureClient();
+    let state = initialSessionState();
+    state = applyEvent(state, { id: 1, type: "todos", data: { items: [{ content: "a", status: "pending" }] }, timestamp: 0 });
+    assert.equal(state.plan.items[0].content, "a");
+    state = applyEvent(state, { id: 2, type: "plan", data: { items: [{ id: "t1", status: "open", owner: "w1" }] }, timestamp: 0 });
+    assert.equal(state.plan.items[0].id, "t1");
+  });
+
+  it("settles running activity on interrupt", () => {
+    const { applyEvent, initialSessionState } = loadPureClient();
+    let state = initialSessionState();
+    state = applyEvent(state, { id: 1, type: "activity_call", data: { call_id: "c1", name: "bash", args: {} }, timestamp: 0 });
+    state = applyEvent(state, { id: 2, type: "presentation", data: { phase: "interrupted" }, timestamp: 0 });
+    assert.equal(state.activity.records.find((r) => r.call_id === "c1").state, "interrupted");
+  });
+});
+
+
