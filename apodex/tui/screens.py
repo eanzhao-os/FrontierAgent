@@ -1385,49 +1385,54 @@ class FilePreviewScreen(_Themed, ModalScreen[None]):
             return Text(f"Could not parse CSV: {exc}", style=self._style("muted"))
 
     def _renderable(self) -> RenderableType:
-        suffix = self.path.suffix.lower()
+        from apodex.preview import build_preview
+        from apodex.tui.themes import palette
 
-        if suffix == ".pdf":
-            return self._render_pdf()
-        if suffix in (".docx", ".doc"):
-            return self._render_docx()
-        if suffix in (".xlsx", ".xls"):
-            return self._render_xlsx()
-        if suffix in (".pptx", ".ppt"):
-            return self._render_pptx()
-        if suffix == ".ipynb":
-            return self._render_ipynb()
-        if suffix in (".pdb", ".cif", ".ent"):
-            return self._render_pdb()
-        if suffix in (".stl", ".obj", ".gltf", ".glb"):
-            return self._render_3d()
-        if suffix in (".zip", ".tar", ".gz", ".tgz"):
-            return self._render_archive()
-        if suffix in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"):
-            return self._render_image()
-        if suffix == ".csv":
-            return self._render_csv()
-
-        with self.path.open("rb") as source:
-            raw = source.read(_MAX_PREVIEW_BYTES + 1)
-        truncated = len(raw) > _MAX_PREVIEW_BYTES
-        raw = raw[:_MAX_PREVIEW_BYTES]
-        text = raw.decode("utf-8", errors="replace")
-        if truncated:
-            text += "\n\n… preview truncated; open the file for the complete contents.\n"
-        if suffix in {".md", ".markdown"}:
+        prev = build_preview(self.path)
+        family = prev["family"]
+        text = prev["text"] or ""
+        error = prev["error"]
+        title = prev["title"] or self.path.name
+        if error and not text:
+            return Text(error, style=self._style("muted"))
+        if family in {"markdown", "docx", "pptx"}:
             return Markdown(text)
-        lexer = _CODE_LEXERS.get(suffix)
-        if lexer:
-            # ``active_theme`` returns a palette name; use the app's dark flag
-            # without baking an opaque syntax background into the modal.
-            from apodex.tui.themes import palette
+        if family == "csv":
+            rows = prev["metadata"].get("rows") or []
+            if rows:
+                table = Table(show_header=True, header_style="bold magenta")
+                header = rows[0]
+                for i, col in enumerate(header[:10]):
+                    table.add_column(str(col) if col else f"Col {i + 1}")
+                for row in rows[1:30]:
+                    table.add_row(*[str(cell) for cell in row[:10]])
+                return table
+        if family == "xlsx":
+            rows = prev["metadata"].get("rows") or []
+            sheets = prev["metadata"].get("sheets") or []
+            table = Table(
+                title=f"Excel: {self.path.name} ({len(sheets)} sheet(s): {', '.join(sheets[:3])})",
+                show_header=True,
+                header_style="bold magenta",
+            )
+            if rows:
+                header = rows[0]
+                for i, col in enumerate(header[:8]):
+                    table.add_column(str(col if col is not None else f"Col {i + 1}"))
+                for row in rows[1:25]:
+                    table.add_row(*[str(cell if cell is not None else "") for cell in row[:8]])
+            return table
+        lexer = _CODE_LEXERS.get(self.path.suffix.lower())
+        if lexer and family == "text":
             theme = "ansi_dark" if palette(active_theme(self)).dark else "ansi_light"
             return Syntax(
                 text, lexer, theme=theme, background_color="default",
                 line_numbers=True, word_wrap=False,
             )
-        return Text(text, style=self._style("text"))
+        body = text
+        if title and title not in body:
+            body = f"{title}\n{body}"
+        return Text(body, style=self._style("text"))
 
     def compose(self) -> ComposeResult:
         with Vertical(id="file-preview-box"):

@@ -786,8 +786,7 @@ async def list_artifacts(session_id: Optional[str] = None) -> dict[str, Any]:
     return {"artifacts": artifacts, "session_id": sid}
 
 
-@app.get("/api/file")
-async def read_file_content(path: str) -> dict[str, Any]:
+def _allowed_web_file(path: str) -> Path:
     from apodex.session_state import discover_all_run_roots
     from apodex.web_paths import allowed_file_path
 
@@ -806,9 +805,14 @@ async def read_file_content(path: str) -> dict[str, Any]:
         inputs_dir=inputs_dir,
         outputs_dir=outputs_dir,
     )
-
     if file_path is None or not file_path.is_file():
         raise HTTPException(status_code=403, detail="Access denied or file not found.")
+    return file_path
+
+
+@app.get("/api/file")
+async def read_file_content(path: str) -> dict[str, Any]:
+    file_path = _allowed_web_file(path)
 
     try:
         content = file_path.read_text(encoding="utf-8", errors="replace")
@@ -822,6 +826,23 @@ async def read_file_content(path: str) -> dict[str, Any]:
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Could not read file: {exc}")
+
+
+@app.get("/api/preview")
+async def preview_file(path: str) -> dict[str, Any]:
+    from apodex.preview import build_preview
+
+    file_path = _allowed_web_file(path)
+    return build_preview(file_path)
+
+
+@app.get("/api/file/raw")
+async def raw_file(path: str) -> FileResponse:
+    from apodex.preview import build_preview
+
+    file_path = _allowed_web_file(path)
+    preview = build_preview(file_path)
+    return FileResponse(file_path, media_type=preview["media_type"])
 
 
 @app.post("/api/revert")
