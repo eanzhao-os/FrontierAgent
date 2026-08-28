@@ -77,7 +77,7 @@ def snapshot_or_replay(bus: EventBroadcaster, last_id: int) -> str | list[WebEve
 
 
 def _last_event_id(request: Request) -> int | None:
-    raw = request.headers.get("last-event-id")
+    raw = request.headers.get("last-event-id") or request.query_params.get("last_event_id")
     if raw in (None, ""):
         return None
     try:

@@ -1040,6 +1040,91 @@
     }
 
     /* ════════════════════════════════════════════════════════════ */
+    /* FA_PURE_START */
+    function initialSessionState() {
+      return {
+        lastEventId: 0,
+        revision: 0,
+        session: null,
+        presentation: { phase: "idle", elapsed_seconds: null, tool_count: 0, queued: 0 },
+        stream: { thinking: "", content: "" },
+        transcript: { blocks: [], has_older: false, before: null },
+        plan: { items: [], summary: "" },
+        activity: { records: [], subagents: [], totals: {} },
+        pending_approval: null,
+        notes: [],
+        forgottenApprovalIds: {},
+      };
+    }
+
+    function applySnapshot(state, snapshot) {
+      const prev = state || initialSessionState();
+      const forgotten = Object.assign({}, prev.forgottenApprovalIds || {});
+      if (snapshot.pending_approval == null) {
+        const prevId = prev.pending_approval && prev.pending_approval.id;
+        if (prevId) forgotten[prevId] = true;
+      } else if (snapshot.pending_approval.id) {
+        delete forgotten[snapshot.pending_approval.id];
+      }
+      return {
+        lastEventId: snapshot.sequence || 0,
+        revision: snapshot.revision || 0,
+        session: snapshot.session || null,
+        presentation: snapshot.presentation || { phase: "idle", elapsed_seconds: null, tool_count: 0, queued: 0 },
+        stream: snapshot.stream || { thinking: "", content: "" },
+        transcript: snapshot.transcript || { blocks: [], has_older: false, before: null },
+        plan: snapshot.plan || { items: [], summary: "" },
+        activity: snapshot.activity || { records: [], subagents: [], totals: {} },
+        pending_approval: snapshot.pending_approval == null ? null : snapshot.pending_approval,
+        notes: [],
+        forgottenApprovalIds: forgotten,
+      };
+    }
+
+    function applyEvent(state, envelope) {
+      const rawId = envelope && envelope.id;
+      const id = rawId === 0 || rawId ? Number(rawId) : NaN;
+      if (!Number.isNaN(id) && id <= state.lastEventId) {
+        return state;
+      }
+      const next = {
+        lastEventId: !Number.isNaN(id) ? id : state.lastEventId,
+        revision: state.revision,
+        session: state.session,
+        presentation: state.presentation,
+        stream: state.stream,
+        transcript: state.transcript,
+        plan: state.plan,
+        activity: state.activity,
+        pending_approval: state.pending_approval,
+        notes: state.notes,
+        forgottenApprovalIds: state.forgottenApprovalIds,
+      };
+      const type = envelope.type;
+      const data = envelope.data || {};
+      if (type === "note") {
+        next.notes = (state.notes || []).concat([data.text]);
+      } else if (type === "thinking_delta") {
+        next.stream = Object.assign({}, state.stream, { thinking: data.accumulated || "" });
+      } else if (type === "content_delta") {
+        next.stream = Object.assign({}, state.stream, { content: data.accumulated || "" });
+      } else if (type === "approval_required") {
+        if (data.id && state.forgottenApprovalIds && state.forgottenApprovalIds[data.id]) {
+          return next;
+        }
+        next.pending_approval = data;
+      } else if (type === "approval_resolved") {
+        next.pending_approval = null;
+        if (data.id) {
+          const forgotten = Object.assign({}, state.forgottenApprovalIds || {});
+          forgotten[data.id] = true;
+          next.forgottenApprovalIds = forgotten;
+        }
+      }
+      return next;
+    }
+    /* FA_PURE_END */
+
     function App() {
       const [isDark, setIsDark] = useState(() => {
         if (typeof window !== "undefined") {
@@ -1319,16 +1404,83 @@
         setMessages((prev) => [...prev, { id: `note-${Date.now()}-${prev.length}`, role: "note", content: text, tone: tone || "info", timestamp: Date.now() }]);
       }, []);
 
-      /* ── SSE wiring — named events, data shape {type, data, timestamp} ── */
+      /* ── SSE wiring — snapshot first, then named events ── */
       useEffect(() => {
-        refreshStatus();
-        refreshWorkspace();
-
+        let cancelled = false;
         let es = null;
-        try {
-          es = new EventSource("/api/events");
-          es.onopen = () => setConnected(true);
-          es.onerror = () => setConnected(false);
+        let sessionState = initialSessionState();
+
+        const hydrate = (snap) => {
+          sessionState = applySnapshot(sessionState, snap);
+          if (snap.session) {
+            if (snap.session.mode) setActiveMode(snap.session.mode);
+            if (snap.session.cwd) setActiveCwd(snap.session.cwd);
+          }
+          if (snap.runtime && snap.runtime.status) {
+            setIsBusy(snap.runtime.status === "running");
+          }
+          setPendingApproval(snap.pending_approval || null);
+          if (snap.stream) {
+            setActiveThinking(snap.stream.thinking || "");
+            setActiveContent(snap.stream.content || "");
+          }
+          if (snap.transcript && Array.isArray(snap.transcript.blocks)) {
+            setMessages(snap.transcript.blocks.map((b) => ({
+              id: b.id,
+              role: b.role,
+              content: b.content || "",
+            })));
+          }
+        };
+
+        const interval = setInterval(refreshStatus, 8000);
+
+        (async () => {
+          refreshStatus();
+          refreshWorkspace();
+          let lastEventId = 0;
+          const res = await safeFetch("/api/state");
+          if (cancelled) return;
+          if (res && res.ok) {
+            try {
+              const snap = await res.json();
+              hydrate(snap);
+              lastEventId = sessionState.lastEventId || 0;
+            } catch {}
+          }
+          if (cancelled) return;
+          try {
+            const url = lastEventId ? `/api/events?last_event_id=${lastEventId}` : "/api/events";
+            es = new EventSource(url);
+            const _add = es.addEventListener.bind(es);
+            es.addEventListener = (name, fn) => {
+              _add(name, (e) => {
+                if (name !== "connected" && name !== "snapshot_required") {
+                  const id = e.lastEventId ? Number(e.lastEventId) : NaN;
+                  if (!Number.isNaN(id) && id <= sessionState.lastEventId) return;
+                  try {
+                    const payload = JSON.parse(e.data);
+                    const prevPending = sessionState.pending_approval;
+                    sessionState = applyEvent(sessionState, {
+                      id: Number.isNaN(id) ? null : id,
+                      type: payload.type || name,
+                      data: payload.data,
+                      timestamp: payload.timestamp,
+                    });
+                    if (name === "approval_required" && sessionState.pending_approval === prevPending) return;
+                  } catch {}
+                }
+                fn(e);
+              });
+            };
+            es.onopen = () => setConnected(true);
+            es.onerror = () => setConnected(false);
+
+            es.addEventListener("snapshot_required", async () => {
+              const snapRes = await safeFetch("/api/state");
+              if (!snapRes || !snapRes.ok || cancelled) return;
+              try { hydrate(await snapRes.json()); } catch {}
+            });
 
           es.addEventListener("connected", () => { setConnected(true); refreshStatus(); });
 
@@ -1620,12 +1772,13 @@
             refreshStatus();
             refreshWorkspace();
           });
-        } catch {
-          setConnected(false);
-        }
+          } catch {
+            setConnected(false);
+          }
+        })();
 
-        const interval = setInterval(refreshStatus, 8000);
         return () => {
+          cancelled = true;
           if (es) es.close();
           clearInterval(interval);
         };
