@@ -30,6 +30,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, Collapsible, Input, Static, Tab, Tabs
 from textual.widgets._collapsible import CollapsibleTitle
 
+from apodex.commands import command_palette_rows, commands_with_arguments
 from apodex.tui.ime import widen_escape_sequence_limit
 from apodex.tui.messages import Render
 from apodex.tui.screens import (
@@ -67,49 +68,10 @@ from frontier_agent.core.messages import Message
 logger = logging.getLogger(__name__)
 
 
-_COMMANDS = (
-    ("/help", "shortcuts and interaction help"),
-    ("/mode", "switch coding, research, React, or Agent Team workflow"),
-    ("/model", "select a model"),
-    ("/settings", "open theme and workflow settings"),
-    ("/cwd", "show or change working directory"),
-    ("/clear", "clear conversation context and plan"),
-    ("/new", "save this session and start a fresh one"),
-    ("/fork", "branch the current context into a new session"),
-    ("/sessions", "list recent saved sessions"),
-    ("/rename", "give the current session a readable name"),
-    ("/plan", "toggle plan mode"),
-    ("/revert", "undo session file changes"),
-    ("/compact", "summarize earlier turns"),
-    ("/cost", "show token and context usage"),
-    ("/context", "visualize current context usage"),
-    ("/config", "show safe local runtime configuration"),
-    ("/init", "write or improve AGENTS.md"),
-    ("/resume", "continue a saved session"),
-    ("/log", "show local trace path"),
-    ("/auto", "toggle auto-approval"),
-    ("/bypass", "bypass all permission checks"),
-    ("/autome", "auto-approve for me (docker / trusted env)"),
-    ("/verbose", "toggle thinking details"),
-    ("/filter", "show all, thinking, tools, errors, or report"),
-    ("/find", "search the visible transcript"),
-    ("/report", "jump to the final report"),
-    ("/copy", "copy the final report"),
-    ("/attach", "attach a workspace file or directory"),
-    ("/attachments", "list files attached to this session"),
-    ("/detach", "remove a session attachment"),
-    ("/paste", "attach files or an image from the macOS clipboard"),
-    ("/theme", "switch visual theme"),
-    ("/workflow", "select React or Agent Team workflow"),
-    ("/exit", "leave apodex"),
-)
+_COMMANDS = command_palette_rows()
+_COMMAND_NAMES = frozenset(name for name, _ in _COMMANDS)
+_COMMANDS_WITH_ARGUMENTS = commands_with_arguments()
 _TRANSCRIPT_VIEW_IDLE = "View: all · /filter thinking|tools|errors|report · /find <text>"
-_COMMAND_NAMES = frozenset(command for command, _ in _COMMANDS)
-_COMMANDS_WITH_ARGUMENTS = frozenset({
-    "/mode", "/model", "/cwd", "/theme", "/workflow", "/filter", "/find",
-    "/attach", "/detach",
-    "/rename",
-})
 _WORKSPACE_SEARCH_LIMIT = 20_000
 _PASTE_DEDUP_WINDOW_SECONDS = 0.35
 _PASTE_INLINE_CHAR_LIMIT = 1_000
