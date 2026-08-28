@@ -12,13 +12,15 @@ import dataclasses
 import json
 import logging
 import os
+import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from dotenv import find_dotenv, load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -145,6 +147,18 @@ class ActionRequest(BaseModel):
     action: str
     arguments: dict[str, Any] = {}
     expected_revision: int | None = None
+
+
+class AttachPathRequest(BaseModel):
+    paths: list[str]
+
+
+_WORKSPACE_SEARCH_SKIP_DIRS = frozenset({
+    ".apodex", ".git", ".hg", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    ".svn", ".tox", ".venv", "__pycache__", "build", "dist", "node_modules",
+    "target", "venv",
+})
+_WORKSPACE_SEARCH_LIMIT = 20_000
 
 
 class WebAgentManager:
@@ -356,6 +370,131 @@ async def get_log() -> dict[str, Any]:
     assert mgr.session is not None
     result = SessionActions(mgr.session).trace_path()
     return {"status": "ok", "path": result.data.get("path", "")}
+
+
+def _attachment_item(item: Any) -> dict[str, Any]:
+    return {
+        "relative_path": item.relative_path,
+        "agent_path": item.agent_path,
+        "size": item.size,
+    }
+
+
+def _upload_byte_limits() -> tuple[int, int]:
+    file_mib = float(os.environ.get("APODEX_WEB_UPLOAD_MAX_FILE_MIB", "100"))
+    request_mib = float(os.environ.get("APODEX_WEB_UPLOAD_MAX_REQUEST_MIB", "500"))
+    return int(file_mib * 1024 * 1024), int(request_mib * 1024 * 1024)
+
+
+@app.get("/api/attachments")
+async def list_attachments() -> dict[str, Any]:
+    mgr = get_manager()
+    if not mgr.session:
+        mgr._init_session(mgr.mode)
+    assert mgr.session is not None
+    return {"attachments": [_attachment_item(item) for item in mgr.session.attachments.list()]}
+
+
+@app.post("/api/attachments/path")
+async def attach_host_paths(req: AttachPathRequest) -> dict[str, Any]:
+    mgr = get_manager()
+    async with mgr._lock:
+        if not mgr.session:
+            mgr._init_session(mgr.mode)
+        assert mgr.session is not None
+        try:
+            added = mgr.session.attachments.attach_many(req.paths)
+        except Exception as exc:
+            raise ApiError("validation", str(exc))
+        mgr.revision += 1
+        return {
+            "status": "ok",
+            "attachments": [_attachment_item(item) for item in added],
+        }
+
+
+@app.post("/api/attachments/upload")
+async def upload_attachments(files: list[UploadFile] = File(...)) -> dict[str, Any]:
+    mgr = get_manager()
+    max_file, max_request = _upload_byte_limits()
+    total = 0
+    temp_paths: list[str] = []
+    temp_dirs: list[str] = []
+    try:
+        for upload in files:
+            data = await upload.read()
+            total += len(data)
+            if len(data) > max_file or total > max_request:
+                raise HTTPException(status_code=413, detail="Upload too large")
+            folder = tempfile.mkdtemp(prefix="apodex-upload-")
+            temp_dirs.append(folder)
+            name = Path(upload.filename or "upload.bin").name or "upload.bin"
+            dest = Path(folder) / name
+            dest.write_bytes(data)
+            temp_paths.append(str(dest))
+        async with mgr._lock:
+            if not mgr.session:
+                mgr._init_session(mgr.mode)
+            assert mgr.session is not None
+            added = mgr.session.attachments.attach_many(temp_paths)
+            mgr.revision += 1
+        return {"status": "ok", "attachments": [_attachment_item(item) for item in added]}
+    finally:
+        for folder in temp_dirs:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+@app.delete("/api/attachments/{name:path}")
+async def detach_attachment(name: str) -> dict[str, Any]:
+    mgr = get_manager()
+    async with mgr._lock:
+        if not mgr.session:
+            mgr._init_session(mgr.mode)
+        assert mgr.session is not None
+        result = SessionActions(mgr.session).detach_attachment(name)
+        mgr.revision += 1
+        return action_http(result)
+
+
+@app.get("/api/files/search")
+async def search_files(q: str = "") -> dict[str, Any]:
+    mgr = get_manager()
+    if not mgr.session:
+        mgr._init_session(mgr.mode)
+    assert mgr.session is not None
+    needle = (q or "").strip().lower()
+    candidates: list[dict[str, str]] = []
+    for item in mgr.session.attachments.list():
+        if not needle or needle in item.relative_path.lower():
+            candidates.append({"path": item.relative_path, "source": "attachment"})
+    cwd = Path(mgr.cwd)
+    walked = 0
+    if cwd.is_dir():
+        stack = [cwd]
+        while stack and walked < _WORKSPACE_SEARCH_LIMIT:
+            current = stack.pop()
+            try:
+                entries = list(os.scandir(current))
+            except OSError:
+                continue
+            for entry in entries:
+                if walked >= _WORKSPACE_SEARCH_LIMIT:
+                    break
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        if entry.name not in _WORKSPACE_SEARCH_SKIP_DIRS:
+                            stack.append(Path(entry.path))
+                        continue
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                except OSError:
+                    continue
+                walked += 1
+                rel = os.path.relpath(entry.path, cwd).replace(os.sep, "/")
+                if needle and needle not in rel.lower():
+                    continue
+                candidates.append({"path": rel, "source": "workspace"})
+    return {"candidates": candidates}
 
 
 @app.post("/api/actions")

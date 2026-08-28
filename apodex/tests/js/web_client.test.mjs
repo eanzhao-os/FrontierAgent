@@ -47,3 +47,16 @@ describe("composer parser", () => {
     assert.equal(hits.join(","), "/clear");
   });
 });
+
+describe("at-mention", () => {
+  it("does not complete at-mentions inside slash commands", () => {
+    const { completeAtMention, isSlashCommand } = loadPureClient();
+    assert.equal(isSlashCommand("/attach ./x", ["/attach"]), true);
+  });
+
+  it("quotes paths that contain spaces", () => {
+    const { completeAtMention } = loadPureClient();
+    const out = completeAtMention("my f", [{ path: "my file.txt" }], []);
+    assert.equal(out.completion.includes("\"") || out.completion.includes("'"), true);
+  });
+});

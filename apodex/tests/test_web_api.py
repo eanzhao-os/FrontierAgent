@@ -291,3 +291,26 @@ def test_context_and_log_endpoints(web_client):
     assert context.status_code == 200
     assert log.status_code == 200
     assert "path" in log.json()
+
+
+def test_attach_path_copies_into_session_inputs(web_client, web_manager, tmp_path):
+    src = tmp_path / "notes.md"
+    src.write_text("hi")
+    res = web_client.post("/api/attachments/path", json={"paths": [str(src)]})
+    assert res.status_code == 200
+    listed = web_client.get("/api/attachments").json()["attachments"]
+    assert any(item["relative_path"].endswith("notes.md") for item in listed)
+
+
+def test_upload_rejects_oversize(web_client, monkeypatch):
+    monkeypatch.setenv("APODEX_WEB_UPLOAD_MAX_FILE_MIB", "0")
+    files = {"files": ("big.bin", b"x", "application/octet-stream")}
+    res = web_client.post("/api/attachments/upload", files=files)
+    assert res.status_code == 413
+
+
+def test_search_lists_attachments_before_workspace(web_client, web_manager, tmp_path):
+    (tmp_path / "readme.md").write_text("x")
+    web_client.post("/api/attachments/path", json={"paths": [str(tmp_path / "readme.md")]})
+    hits = web_client.get("/api/files/search", params={"q": "read"}).json()["candidates"]
+    assert hits[0]["source"] == "attachment"
