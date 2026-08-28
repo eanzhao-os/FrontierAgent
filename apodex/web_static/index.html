@@ -1428,6 +1428,119 @@
       }
       return { completion: completion, hits: hits };
     }
+
+    function messagesToTranscriptBlocks(messages) {
+      const blocks = [];
+      const list = messages || [];
+      for (let i = 0; i < list.length; i++) {
+        const msg = list[i];
+        if (msg.role === "user") {
+          blocks.push({ id: msg.id, kind: "user", title: "", body: msg.content || "", collapsed: false, sourceId: msg.id });
+        } else if (msg.role === "note") {
+          blocks.push({
+            id: msg.id,
+            kind: msg.tone === "error" ? "error" : "note",
+            title: msg.content || "",
+            body: msg.content || "",
+            collapsed: false,
+            sourceId: msg.id,
+          });
+        } else {
+          if (msg.thinking) {
+            blocks.push({
+              id: msg.id + ":thinking",
+              kind: "thinking",
+              title: "Thoughts",
+              body: msg.thinking,
+              collapsed: shouldCollapseThinking(msg.thinking),
+              sourceId: msg.id,
+            });
+          }
+          const tools = msg.toolCalls || [];
+          for (let t = 0; t < tools.length; t++) {
+            const tc = tools[t];
+            blocks.push({
+              id: tc.call_id || (msg.id + ":tool:" + t),
+              kind: "tool",
+              title: tc.name || "tool",
+              body: String(tc.result || ""),
+              collapsed: false,
+              sourceId: msg.id,
+            });
+          }
+          if (msg.content) {
+            blocks.push({
+              id: msg.id + ":report",
+              kind: "report",
+              title: "Final",
+              body: msg.content,
+              collapsed: false,
+              sourceId: msg.id,
+            });
+          }
+        }
+      }
+      return blocks;
+    }
+
+    function filterTranscript(blocks, mode, query) {
+      const list = blocks || [];
+      const q = String(query || "").toLowerCase();
+      const out = [];
+      for (let i = 0; i < list.length; i++) {
+        const block = list[i];
+        const kind = block.kind || "";
+        let keep = true;
+        if (mode === "tools") keep = kind === "tool";
+        else if (mode === "thinking") keep = kind === "thinking";
+        else if (mode === "errors") keep = kind === "error";
+        else if (mode === "report") keep = kind === "report";
+        else if (mode === "search") keep = true;
+        if (mode === "search" || (q && mode === "all")) {
+          const title = String(block.title || "").toLowerCase();
+          const body = String(block.body || "").toLowerCase();
+          keep = title.indexOf(q) >= 0 || body.indexOf(q) >= 0;
+        }
+        if (keep) out.push(block);
+      }
+      return out;
+    }
+
+    function withJumpToReport(state) {
+      const blocks = (state && state.blocks) || [];
+      let reviewId = null;
+      for (let i = blocks.length - 1; i >= 0; i--) {
+        if (blocks[i].kind === "report") {
+          reviewId = blocks[i].id;
+          break;
+        }
+      }
+      const filter = state && state.filter;
+      const incompatible = filter === "tools" || filter === "thinking" || filter === "errors";
+      return {
+        filter: incompatible ? "all" : (filter || "all"),
+        reviewId: reviewId,
+        blocks: blocks,
+      };
+    }
+
+    function shouldCollapseThinking(text) {
+      const value = String(text || "");
+      if (value.length >= 900) return true;
+      let lines = 1;
+      for (let i = 0; i < value.length; i++) {
+        if (value.charAt(i) === "\n") lines += 1;
+      }
+      return lines >= 10;
+    }
+
+    function copyReportText(blocks) {
+      const list = blocks || [];
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (list[i].kind === "report") return list[i].body || "";
+      }
+      return "";
+    }
     /* FA_PURE_END */
 
     function App() {
@@ -1496,6 +1609,12 @@
       const [inspectSession, setInspectSession] = useState(null);
       const [previewFile, setPreviewFile] = useState(null);
       const [revertArmed, setRevertArmed] = useState(false);
+      const [transcriptFilter, setTranscriptFilter] = useState("all");
+      const [transcriptQuery, setTranscriptQuery] = useState("");
+      const [reviewId, setReviewId] = useState(null);
+      const [followTail, setFollowTail] = useState(true);
+      const [hasOlder, setHasOlder] = useState(false);
+      const [olderCursor, setOlderCursor] = useState(null);
 
       const chatContainerRef = useRef(null);
       const activeContentRef = useRef("");
@@ -1510,10 +1629,14 @@
       thinkingStartedAtRef.current = thinkingStartedAt;
 
       const scrollToBottom = useCallback(() => {
-        if (!chatContainerRef.current) return;
+        if (!followTail || !chatContainerRef.current) return;
+        chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+      }, [followTail]);
+
+      const jumpToLatest = useCallback(() => {
+        setFollowTail(true);
         const el = chatContainerRef.current;
-        const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 180;
-        if (isNearBottom) el.scrollTop = el.scrollHeight;
+        if (el) el.scrollTop = el.scrollHeight;
       }, []);
 
       // Elapsed-time ticker — time is visible
@@ -1786,6 +1909,8 @@
               role: b.role,
               content: b.content || "",
             })));
+            setHasOlder(!!snap.transcript.has_older);
+            setOlderCursor(snap.transcript.before || null);
           }
         };
 
@@ -2201,6 +2326,23 @@
           if (name === "/help") { setHelpOpen(true); return; }
           if (name === "/settings") { setIsSettingsOpen(true); return; }
           if (name === "/exit") { setLeftSession(true); return; }
+          if (name === "/filter") {
+            const mode = (parsed.argument || "all").toLowerCase();
+            setTranscriptFilter(["all", "thinking", "tools", "errors", "report"].indexOf(mode) >= 0 ? mode : "all");
+            return;
+          }
+          if (name === "/find") { setTranscriptQuery(parsed.argument); return; }
+          if (name === "/report") {
+            const jumped = withJumpToReport({ filter: transcriptFilter, blocks: messagesToTranscriptBlocks(messages) });
+            setTranscriptFilter(jumped.filter);
+            setReviewId(jumped.reviewId);
+            return;
+          }
+          if (name === "/copy") {
+            const text = copyReportText(messagesToTranscriptBlocks(messages));
+            if (text && navigator.clipboard) navigator.clipboard.writeText(text);
+            return;
+          }
           if (parsed.spec && parsed.spec.action) {
             const res = await postSessionAction(parsed.spec.action, slashActionArgs(parsed.spec.action, parsed.argument));
             if (res && res.ok) {
@@ -2268,6 +2410,80 @@
         const rank = { in_progress: 0, open: 1, resolved: 2, cancelled: 3 };
         return [...board].sort((a, b) => (rank[a.resolution] ?? 1) - (rank[b.resolution] ?? 1) || a.id.localeCompare(b.id));
       }, [board]);
+
+      const transcriptBlocks = useMemo(() => messagesToTranscriptBlocks(messages), [messages]);
+      const visibleBlocks = useMemo(() => {
+        const mode = transcriptQuery && transcriptFilter === "all" ? "search" : transcriptFilter;
+        return filterTranscript(transcriptBlocks, mode, transcriptQuery);
+      }, [transcriptBlocks, transcriptFilter, transcriptQuery]);
+      const visibleSourceIds = useMemo(() => {
+        const ids = {};
+        for (let i = 0; i < visibleBlocks.length; i++) ids[visibleBlocks[i].sourceId] = true;
+        return ids;
+      }, [visibleBlocks]);
+      const visibleMessages = useMemo(
+        () => (transcriptFilter === "all" && !transcriptQuery ? messages : messages.filter((msg) => visibleSourceIds[msg.id])),
+        [messages, transcriptFilter, transcriptQuery, visibleSourceIds],
+      );
+
+      useEffect(() => {
+        const onKey = (e) => {
+          if (e.altKey && (e.key === "j" || e.key === "J")) {
+            e.preventDefault();
+            const list = visibleBlocks;
+            let idx = -1;
+            for (let i = 0; i < list.length; i++) if (list[i].id === reviewId) idx = i;
+            const next = list[idx + 1] || list[0];
+            if (next) setReviewId(next.id);
+            return;
+          }
+          if (e.altKey && (e.key === "k" || e.key === "K")) {
+            e.preventDefault();
+            const list = visibleBlocks;
+            let idx = list.length;
+            for (let i = 0; i < list.length; i++) if (list[i].id === reviewId) idx = i;
+            const next = list[idx - 1] || list[list.length - 1];
+            if (next) setReviewId(next.id);
+            return;
+          }
+          if (e.ctrlKey && (e.key === "g" || e.key === "G")) {
+            e.preventDefault();
+            const jumped = withJumpToReport({ filter: transcriptFilter, blocks: transcriptBlocks });
+            setTranscriptFilter(jumped.filter);
+            setReviewId(jumped.reviewId);
+            return;
+          }
+          if (e.ctrlKey && (e.key === "y" || e.key === "Y")) {
+            e.preventDefault();
+            const text = copyReportText(transcriptBlocks);
+            if (text && navigator.clipboard) navigator.clipboard.writeText(text);
+          }
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+      }, [visibleBlocks, transcriptBlocks, transcriptFilter, reviewId]);
+
+      useEffect(() => {
+        if (!reviewId) return;
+        const escaped = (window.CSS && CSS.escape) ? CSS.escape(reviewId) : reviewId;
+        const source = String(reviewId).split(":")[0];
+        const sourceEscaped = (window.CSS && CSS.escape) ? CSS.escape(source) : source;
+        const el = document.querySelector(`[data-block-id="${escaped}"]`) || document.querySelector(`[data-block-id="${sourceEscaped}"]`);
+        if (el) el.scrollIntoView({ block: "nearest" });
+      }, [reviewId]);
+
+      const loadOlderTranscript = async () => {
+        if (!olderCursor) return;
+        const res = await safeFetch(`/api/transcript?before=${encodeURIComponent(olderCursor)}`);
+        if (!res || !res.ok) return;
+        try {
+          const page = await res.json();
+          const older = (page.blocks || []).map((b) => ({ id: b.id, role: b.role, content: b.content || "" }));
+          setMessages((prev) => older.concat(prev));
+          setHasOlder(!!page.has_older);
+          setOlderCursor(page.before || null);
+        } catch {}
+      };
 
       const usage = usageLive || status?.usage || {};
       const contextWindow = usageLive?.window || 0;
@@ -2571,8 +2787,49 @@
             {/* Stream area */}
             <div className="flex flex-1 overflow-hidden">
               <main className="flex flex-1 flex-col overflow-hidden">
-                <div ref={chatContainerRef} className="flex-1 overflow-y-auto px-6 py-6">
+                <div
+                  ref={chatContainerRef}
+                  className="flex-1 overflow-y-auto px-6 py-6"
+                  onScroll={(e) => {
+                    const el = e.currentTarget;
+                    if (el.scrollHeight - el.scrollTop - el.clientHeight > 180) setFollowTail(false);
+                  }}
+                >
                   <div className="mx-auto flex max-w-[760px] flex-col gap-4">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {[["all", isZh ? "全部" : "All"], ["thinking", isZh ? "思考" : "Thinking"], ["tools", isZh ? "工具" : "Tools"], ["errors", isZh ? "错误" : "Errors"], ["report", isZh ? "报告" : "Report"]].map(([key, label]) => (
+                        <button
+                          key={key}
+                          type="button"
+                          onClick={() => setTranscriptFilter(key)}
+                          className="cursor-pointer rounded-full px-2.5 py-0.5 text-[11px]"
+                          style={{
+                            backgroundColor: transcriptFilter === key ? "var(--accent-tint)" : "var(--field)",
+                            color: transcriptFilter === key ? "var(--accent-ink)" : "var(--ink-2)",
+                            border: "none",
+                          }}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                      <input
+                        value={transcriptQuery}
+                        onChange={(e) => setTranscriptQuery(e.target.value)}
+                        placeholder={isZh ? "搜索…" : "Search…"}
+                        className="ml-auto min-w-[8rem] rounded-md px-2 py-1 text-[11.5px] outline-none"
+                        style={{ backgroundColor: "var(--field)", color: "var(--ink)", border: "none" }}
+                      />
+                      {!followTail && (
+                        <button type="button" onClick={jumpToLatest} className="cursor-pointer rounded-full px-2.5 py-0.5 text-[11px]" style={{ backgroundColor: "var(--accent)", color: "#fff", border: "none" }}>
+                          {isZh ? "跳到最新" : "Jump to latest"}
+                        </button>
+                      )}
+                    </div>
+                    {hasOlder && (
+                      <button type="button" onClick={loadOlderTranscript} className="cursor-pointer self-center rounded-lg px-3 py-1 text-[11.5px]" style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-btn)", color: "var(--ink-2)", border: "none" }}>
+                        {isZh ? "加载更早记录" : "Load older"}
+                      </button>
+                    )}
                     {!connected && (
                       <div className="flex items-center justify-between rounded-[10px] p-3 text-[12.5px]"
                            style={{ backgroundColor: "var(--orange-tint)", color: "var(--orange)" }}>
@@ -2592,7 +2849,7 @@
                     )}
 
                     {/* Empty state */}
-                    {messages.length === 0 && !isBusy && (
+                    {visibleMessages.length === 0 && messages.length === 0 && !isBusy && (
                       <div className="mx-auto my-14 flex max-w-md flex-col items-center text-center">
                         <div className="mb-4 flex size-14 items-center justify-center rounded-2xl border shadow-sm"
                              style={{ backgroundColor: "var(--surface)", borderColor: "var(--line)", color: "var(--ink)" }}>
@@ -2637,8 +2894,13 @@
                     )}
 
                     {/* Settled messages (chronological: turns, notes) */}
-                    {messages.map((msg) => (
-                      <div key={msg.id} className="anim-fade-up">
+                    {visibleMessages.map((msg) => (
+                      <div
+                        key={msg.id}
+                        data-block-id={msg.id}
+                        className="anim-fade-up"
+                        style={reviewId && String(reviewId).indexOf(msg.id) === 0 ? { boxShadow: "0 0 0 1px var(--accent)" } : undefined}
+                      >
                         {msg.role === "user" ? (
                           <div className="flex justify-end">
                             <div className="max-w-[75%] whitespace-pre-wrap rounded-[10px] px-3.5 py-2.5 text-[13px] leading-relaxed"
@@ -2651,7 +2913,7 @@
                         ) : (
                           <div className="flex flex-col gap-2.5">
                             {msg.thinking && (
-                              <ThinkingTrace live={false} text={msg.thinking} elapsedMs={msg.thinkingMs} isZh={isZh} defaultOpen={false} />
+                              <ThinkingTrace live={false} text={msg.thinking} elapsedMs={msg.thinkingMs} isZh={isZh} defaultOpen={!shouldCollapseThinking(msg.thinking)} />
                             )}
                             {msg.toolCalls && msg.toolCalls.length > 0 && (
                               <div className="flex flex-col">

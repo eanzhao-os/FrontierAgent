@@ -33,7 +33,7 @@ from apodex.commands import capabilities_payload
 from apodex.profiles import get_profile, profile_names, terminal_mode_names
 from apodex.session import TerminalSession, new_session_id
 from apodex.session_actions import ActionResult, HTTP_STATUS, SessionActions
-from apodex.session_snapshot import build_session_snapshot
+from apodex.session_snapshot import build_session_snapshot, transcript_page
 from apodex.web_observer import EventBroadcaster, WebApprover, WebEvent, WebRenderer
 
 # Load environment variables
@@ -698,6 +698,15 @@ async def stream_events(request: Request) -> EventSourceResponse:
             await mgr.broadcaster.unsubscribe(queue)
 
     return EventSourceResponse(event_generator())
+
+
+@app.get("/api/transcript")
+async def get_transcript(before: str | None = None) -> dict[str, Any]:
+    mgr = get_manager()
+    if not mgr.session:
+        mgr._init_session(mgr.mode)
+    assert mgr.session is not None
+    return transcript_page(mgr.session, before=before)
 
 
 @app.get("/api/history")

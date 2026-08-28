@@ -25,15 +25,33 @@ def _message_content(message: object) -> tuple[str, str]:
     return role, str(content or "")
 
 
-def _transcript_blocks(session: Any) -> tuple[list[dict[str, Any]], bool, str | None]:
+def transcript_page(
+    session: Any,
+    *,
+    before: str | None = None,
+    limit: int = _TRANSCRIPT_LIMIT,
+) -> dict[str, Any]:
     messages = list(getattr(session, "display_history", None) or getattr(session, "history", None) or [])
-    blocks: list[dict[str, Any]] = []
-    for index, message in enumerate(messages[-_TRANSCRIPT_LIMIT:]):
+    all_blocks: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
         role, content = _message_content(message)
-        blocks.append({"id": f"b{index}", "role": role, "content": content})
-    has_older = len(messages) > _TRANSCRIPT_LIMIT
-    before = blocks[0]["id"] if has_older and blocks else None
-    return blocks, has_older, before
+        all_blocks.append({"id": f"b{index}", "role": role, "content": content})
+    end = len(all_blocks)
+    if before:
+        for index, block in enumerate(all_blocks):
+            if block["id"] == before:
+                end = index
+                break
+    start = max(0, end - limit)
+    blocks = all_blocks[start:end]
+    has_older = start > 0
+    before_id = blocks[0]["id"] if has_older and blocks else None
+    return {"blocks": blocks, "has_older": has_older, "before": before_id}
+
+
+def _transcript_blocks(session: Any) -> tuple[list[dict[str, Any]], bool, str | None]:
+    page = transcript_page(session)
+    return page["blocks"], page["has_older"], page["before"]
 
 
 def _config_dict(session: Any) -> dict[str, Any]:

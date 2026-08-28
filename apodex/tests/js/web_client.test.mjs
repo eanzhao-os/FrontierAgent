@@ -60,3 +60,25 @@ describe("at-mention", () => {
     assert.equal(out.completion.includes("\"") || out.completion.includes("'"), true);
   });
 });
+
+describe("transcript", () => {
+  it("filters tools and searches collapsed titles", () => {
+    const { filterTranscript } = loadPureClient();
+    const blocks = [
+      { id: "1", kind: "thinking", title: "Thoughts", body: "abc", collapsed: true },
+      { id: "2", kind: "tool", title: "bash ls", body: "out" },
+      { id: "3", kind: "error", title: "fail", body: "no" },
+      { id: "4", kind: "report", title: "Final", body: "done" },
+    ];
+    assert.equal(filterTranscript(blocks, "tools", "").map((b) => b.id).join(), "2");
+    assert.equal(filterTranscript(blocks, "search", "thou").map((b) => b.id).join(), "1");
+  });
+
+  it("jump to report clears tools filter", () => {
+    const { withJumpToReport } = loadPureClient();
+    const next = withJumpToReport({ filter: "tools", blocks: [{ id: "r", kind: "report" }] });
+    assert.equal(next.filter, "all");
+    assert.equal(next.reviewId, "r");
+  });
+});
+
