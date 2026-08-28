@@ -28,8 +28,10 @@ from apodex.middleware import (
     _wrap_skills_llm,
 )
 from apodex.observers import Approver
+from apodex.commands import get_command
 from apodex.profiles import get_profile, profile_names, terminal_mode_names
 from apodex.render import Renderer
+from apodex.session_actions import SessionActions
 from apodex.session_state import (
     _session_state_path,
     list_saved_sessions,
@@ -796,287 +798,61 @@ class TerminalSession(TaskRunnerMixin):
     async def _slash(self, line: str) -> bool:
         """Handle a slash command. Returns True if the REPL should exit."""
         parts = line.split(maxsplit=1)
-        cmd = parts[0].lower()
+        token = parts[0]
         arg = parts[1].strip() if len(parts) > 1 else ""
-        if cmd in ("/exit", "/quit"):
+        spec = get_command(token)
+        if spec is None:
+            self.r.error(f"unknown command {token.lower()!r} (try /help)")
+            return False
+        if spec.name == "/exit":
             self.r.note("bye")
             return True
-        if cmd == "/help":
+        if spec.name == "/resume" and not arg:
+            return await self._slash_presentation(spec, arg)
+        if spec.kind in {"session_action", "task_submit"} and spec.action:
+            result = await SessionActions(self).dispatch(spec, arg)
+            (self.r.note if result.ok else self.r.error)(result.message)
+            if spec.action == "run_init" and result.ok:
+                self.r.rule()
+                await self.run_task(_INIT_PROMPT)
+            return False
+        return await self._slash_presentation(spec, arg)
+
+    async def _slash_presentation(self, spec, arg: str) -> bool:
+        if spec.name == "/help":
             self.r.note(_HELP.format(modes=" | ".join(terminal_mode_names())))
-        elif cmd in ("/mode", "/workflow"):
-            if not arg:
-                self.r.note(f"mode = {self.mode}  (available: {', '.join(terminal_mode_names())})")
-            elif arg not in terminal_mode_names():
-                self.r.error(f"unknown mode {arg!r}; available: {', '.join(terminal_mode_names())}")
-            else:
-                import dataclasses
-
-                from apodex.env import environment_section
-                from apodex.todo import clear_todos
-                # The profile carries its own model list — adopt its default
-                # (copy so /model edits don't mutate the cached profile), refresh
-                # the selectable models, and rebuild the client.
-                new_profile = get_profile(arg)
-                new_cfg = dataclasses.replace(new_profile.model_config)
-                status = new_profile.runtime_config(new_cfg, mode=arg)
-                if not status.ok:
-                    self.r.error(format_preflight_errors(status))
-                    return False
-                new_env_section = environment_section(self.cwd, new_cfg.model)
-                new_llm = build_llm(new_cfg)
-                if new_profile.skills:
-                    new_llm = _wrap_skills_llm(new_llm, new_profile.skills)
-
-                # Commit only after all fallible derived state is ready, so a
-                # client/profile error leaves the current session untouched.
-                discarded_workspace = self._active_spill_workspace()
-                self.mode = arg
-                self.history = []
-                self.workflow_turns = []
-                self.usage.clear_context()
-                self._cleanup_discarded_spill(discarded_workspace)
-                clear_todos()
-                self.cfg = new_cfg
-                self.models = list(new_profile.models)
-                self.r.set_usage(self.usage, self.cfg.context_window)
-                self._env_section = new_env_section
-                self.llm = new_llm
-                self.r.note(f"mode → {arg} (model {self.cfg.model}, context reset)")
-                for warning in status.warnings:
-                    self.r.note(f"warning: {warning.message}")
-        elif cmd == "/clear":
-            discarded_workspace = self._active_spill_workspace()
-            self.history = []
-            self.workflow_turns = []
-            self.usage.clear_context()
-            self._cleanup_discarded_spill(discarded_workspace)
-            from apodex import fsguard
-            from apodex.todo import clear_todos
-            clear_todos()
-            fsguard.clear()
-            self.r.note("context + plan cleared (repo state unchanged)")
-        elif cmd == "/new":
-            previous, current = self.start_new_session()
-            self.r.note(f"saved {previous}\nstarted new session {current}")
-        elif cmd == "/fork":
-            previous, current = self.start_new_session(fork=True)
-            self.r.note(f"saved {previous}\nforked context into {current}")
-        elif cmd == "/rename":
-            try:
-                name = self.rename_session(arg)
-                self.r.note(f"session renamed → {name}")
-            except ValueError as exc:
-                self.r.error(str(exc))
-        elif cmd == "/sessions":
-            sessions = list_saved_sessions()[:20]
-            if not sessions:
-                self.r.note("no saved sessions yet")
-            else:
-                rows = ["Recent sessions:"]
-                for item in sessions:
-                    label = f" · {item['name']}" if item.get("name") else ""
-                    current = "  (current)" if item["session_id"] == self.session_id else ""
-                    rows.append(
-                        f"  {item['session_id']}{label}{current}\n"
-                        f"    {item['modified_at']} · {item['mode']} · "
-                        f"{item['message_count']} msgs · {item['cwd']}"
-                    )
-                self.r.note("\n".join(rows))
-        elif cmd == "/revert":
-            # Read before reverting: revert_all clears the journal.
-            observed = self.journal.observed_only()
-            reverted = self.journal.revert_all()
-            if reverted:
-                self.r.note("reverted " + ", ".join(reverted))
-            elif observed:
-                # Not "nothing changed" — the very next line lists changes that
-                # were found and deliberately left alone.
-                self.r.note("nothing to revert (no attributed edits)")
-            else:
-                self.r.note(
-                    "nothing to revert (no journaled edits — sandbox writes "
-                    "outside the session directory are not tracked)"
-                )
-            if observed:
-                # The Diff tab shows these, so silence here would read as
-                # "everything is back" when it is not.
-                self.r.note(
-                    "left alone (found by scanning, not attributed to a file "
-                    "tool — undo them yourself): " + ", ".join(observed)
-                )
-        elif cmd == "/log":
-            self.r.note(f"trace: {self.trace_path}")
-        elif cmd in {"/attach", "/attachments", "/detach", "/paste"}:
-            import shlex
-
-            from apodex.attachments import AttachmentError, format_size
-            from apodex.clipboard import ClipboardError
-
-            try:
-                attachment_args = shlex.split(line)[1:]
-                if cmd == "/attach":
-                    if not attachment_args:
-                        self.r.error("usage: /attach <path> [path ...]")
-                    else:
-                        added = self.attachments.attach_many(attachment_args)
-                        self.r.note("attached: " + ", ".join(
-                            item.relative_path for item in added
-                        ))
-                elif cmd == "/detach":
-                    if len(attachment_args) != 1:
-                        self.r.error("usage: /detach <attachment>")
-                    else:
-                        removed = self.attachments.detach(attachment_args[0])
-                        self.r.note(f"detached {attachment_args[0]} ({removed} file(s))")
-                elif cmd == "/attachments":
-                    items = self.attachments.list()
-                    self.r.note("no files attached" if not items else "attached files:\n" + "\n".join(
-                        f"  {item.relative_path} · {format_size(item.size)} · {item.agent_path}"
-                        for item in items
-                    ))
-                else:
-                    from apodex.clipboard import paste_from_clipboard
-
-                    result = await asyncio.to_thread(
-                        paste_from_clipboard, self.attachments,
-                    )
-                    if result.kind == "attachments":
-                        self.r.note("pasted attachments: " + ", ".join(result.attachments))
-                    elif result.kind == "text":
-                        self.r.note("clipboard contains text; paste it at the prompt")
-                    else:
-                        self.r.note(result.message or "clipboard is empty or unsupported")
-            except (AttachmentError, ClipboardError, ValueError) as exc:
-                self.r.error(str(exc))
-        elif cmd == "/verbose":
-            self.verbose = not self.verbose
-            self.r.set_verbose(self.verbose)
-            self.r.note(f"verbose thinking = {self.verbose}")
-        elif cmd == "/plan":
-            self.plan_state.active = not self.plan_state.active
-            if self.plan_state.active:
-                self.r.note("▤ plan mode ON — edits locked until you approve a plan")
-            else:
-                self.r.note("plan mode OFF — edits allowed (with approval)")
-        elif cmd == "/theme":
+            return False
+        if spec.name == "/theme":
             from apodex.tui.themes import CLI_THEME_NAMES
             if not arg:
                 self.r.note("usage: /theme " + "|".join(CLI_THEME_NAMES))
             elif arg not in CLI_THEME_NAMES:
                 self.r.note("unknown theme: " + arg)
             else:
-                from apodex.render import Renderer
                 self.r = Renderer(theme=arg, verbose=self.verbose)
                 self.user_settings.theme = arg
                 self.user_settings.save()
                 self.r.note(f"theme → {arg}")
-        elif cmd in ("/auto", "/bypass"):
-            self.approver.auto_approve = not self.approver.auto_approve
-            self.user_settings.auto_approve = self.approver.auto_approve
-            self.user_settings.save()
-            self.r.note(f"bypass permission (auto-approve) = {self.approver.auto_approve}")
-        elif cmd in ("/autome", "/auto-for-me"):
-            self.approver.auto_for_me = not self.approver.auto_for_me
-            self.user_settings.auto_for_me = self.approver.auto_for_me
-            self.user_settings.save()
-            self.r.note(f"auto for me (docker/trusted env mode) = {self.approver.auto_for_me}")
-        elif cmd == "/cwd":
-            if arg:
-                try:
-                    discarded_workspace = self._active_spill_workspace()
-                    os.chdir(arg)
-                    self.cwd = os.getcwd()
-                    manager = getattr(self, "attachments", None)
-                    update_root = getattr(manager, "set_source_root", None)
-                    if callable(update_root):
-                        update_root(self.cwd)
-                    self._activate_session_workspace(self.session_id, self.cwd)
-                    self._activate_session_outputs(self.session_id, self.cwd)
-                    self._authorize_workspace(self.cwd)
-                    self.history = []
-                    self.workflow_turns = []
-                    self.usage.clear_context()
-                    self._cleanup_discarded_spill(discarded_workspace)
-                    from apodex import fsguard
-                    from apodex.changes import WorkspaceJournal
-                    from apodex.env import environment_section
-                    self.journal = WorkspaceJournal(self.cwd)
-                    fsguard.clear()
-                    self._env_section = environment_section(self.cwd, self.cfg.model)
-                    self.r.note(f"cwd → {self.cwd} (context reset)")
-                except Exception as exc:
-                    self.r.error(f"cd failed: {exc}")
-            else:
-                self.r.note(f"cwd = {self.cwd}")
-        elif cmd == "/model":
-            models = self.models
-            if not arg:
-                if models:
-                    lines = "\n".join(
-                        f"  {i}. {m}" + ("  (current)" if m == self.cfg.model else "")
-                        for i, m in enumerate(models, 1)
-                    )
-                    self.r.note(
-                        f"model = {self.cfg.model}\n"
-                        f"available (profile '{self.mode}'):\n{lines}\n"
-                        f"switch with /model <name|number>"
-                    )
-                else:
-                    self.r.note(f"model = {self.cfg.model}")
-            else:
-                # Accept a 1-based index into the profile list, a listed name, or
-                # any free-form model id (with a note that it's off-list).
-                target = arg
-                if arg.isdigit() and 1 <= int(arg) <= len(models):
-                    target = models[int(arg) - 1]
-                try:
-                    from apodex.env import environment_section
-                    self.cfg.model = target
-                    self._build_llm()
-                    self._env_section = environment_section(self.cwd, self.cfg.model)
-                    note = f"model → {target}"
-                    if models and target not in models:
-                        note += " (not in the profile's list)"
-                    self.r.note(note)
-                except Exception as exc:
-                    self.r.error(f"model switch failed: {exc}")
-        elif cmd == "/compact":
-            if not self.history:
-                self.r.note("nothing to compact (no conversation yet)")
-            else:
-                from frontier_agent.core.runtime.loop.compact_llm import LLMSummaryCompactor
-                before = len(self.history)
-                tool_results = sum(
-                    message.get("role") == "tool" for message in self.history
-                )
-                self.history = await LLMSummaryCompactor(summary_llm=self.llm).compact(
-                    self.history,
-                    # An explicit compact is a checkpoint: compress every tool
-                    # result first, then synthesize the complete conversation.
-                    # No raw tail is retained, avoiding an old large result
-                    # immediately filling the next request's context.
-                    keep_recent=0,
-                    compress_all_tool_results=True,
-                )
-                self.usage.compactions += 1
-                self.r.note(
-                    f"compacted {tool_results} tool results and summarized history: "
-                    f"{before} → {len(self.history)} messages"
-                )
-        elif cmd in ("/cost", "/context"):
-            self.r.note(self.usage.context_report(
-                self.cfg.context_window,
-                output_reserve=int(getattr(self.cfg, "max_tokens", 0) or 0),
-            ))
-        elif cmd == "/config":
-            self.r.note(format_runtime_config_status(self.runtime_config_status()))
-        elif cmd == "/init":
-            self.r.rule()
-            await self.run_task(_INIT_PROMPT)
-        elif cmd == "/resume":
+            return False
+        if spec.name == "/resume":
             await self._resume_picker()
-        else:
-            self.r.error(f"unknown command {cmd!r} (try /help)")
+            return False
+        if spec.name == "/paste":
+            from apodex.attachments import AttachmentError
+            from apodex.clipboard import ClipboardError, paste_from_clipboard
+
+            try:
+                result = await asyncio.to_thread(paste_from_clipboard, self.attachments)
+                if result.kind == "attachments":
+                    self.r.note("pasted attachments: " + ", ".join(result.attachments))
+                elif result.kind == "text":
+                    self.r.note("clipboard contains text; paste it at the prompt")
+                else:
+                    self.r.note(result.message or "clipboard is empty or unsupported")
+            except (AttachmentError, ClipboardError, ValueError) as exc:
+                self.r.error(str(exc))
+            return False
+        self.r.note(f"{spec.name} is available in the TUI")
         return False
 
     async def _resume_picker(self) -> None:

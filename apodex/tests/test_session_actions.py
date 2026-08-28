@@ -1,3 +1,5 @@
+import asyncio
+
 from apodex.config import ModelConfig
 from apodex.render import Renderer
 from apodex.session import TerminalSession, load_session_state
@@ -84,3 +86,25 @@ def test_rename_validates_blank_and_length(tmp_path, monkeypatch):
 def test_resume_missing_session_is_not_found(tmp_path, monkeypatch):
     result = SessionActions(_session(tmp_path, monkeypatch)).resume_session("no-such")
     assert result.ok is False and result.code == "not_found"
+
+
+def test_switch_model_keeps_history(tmp_path, monkeypatch):
+    session = _session(tmp_path, monkeypatch)
+    session.history = [{"role": "user", "content": "stay"}]
+    session.models = ["fake", "other"]
+    result = SessionActions(session).switch_model("other")
+    assert result.ok
+    assert session.cfg.model == "other"
+    assert session.history == [{"role": "user", "content": "stay"}]
+
+
+def test_switch_workflow_unknown_is_validation(tmp_path, monkeypatch):
+    result = SessionActions(_session(tmp_path, monkeypatch)).switch_workflow("nope")
+    assert result.ok is False and result.code == "validation"
+
+
+def test_slash_adapter_uses_actions(tmp_path, monkeypatch):
+    session = _session(tmp_path, monkeypatch)
+    session.history = [{"role": "user", "content": "x"}]
+    assert asyncio.run(session._slash("/clear")) is False
+    assert session.history == []
