@@ -124,6 +124,24 @@ class WebApprover:
         self.interactive = True
         self.inbox: Any = None
         self._pending: dict[str, asyncio.Future[Decision]] = {}
+        self._pending_info: dict[str, dict[str, Any]] = {}
+
+    def pending_snapshot(self) -> dict[str, Any] | None:
+        for approval_id, fut in self._pending.items():
+            if fut.done():
+                continue
+            info = self._pending_info.get(approval_id)
+            if info is not None:
+                return {
+                    "id": info["id"],
+                    "tool": info["tool"],
+                    "target": info["target"],
+                    "reason": info["reason"],
+                    "dangerous": info["dangerous"],
+                    "preview": info["preview"],
+                    "preview_kind": info["preview_kind"],
+                }
+        return None
 
     async def confirm(
         self,
@@ -141,21 +159,22 @@ class WebApprover:
         approval_id = f"appr-{uuid.uuid4().hex[:8]}"
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Decision] = loop.create_future()
+        info = {
+            "id": approval_id,
+            "tool": name,
+            "target": target,
+            "reason": reason,
+            "dangerous": dangerous,
+            "preview": preview,
+            "preview_kind": preview_kind,
+        }
         self._pending[approval_id] = fut
+        self._pending_info[approval_id] = info
 
         # Broadcast approval request to frontend
         await self.broadcaster.emit(
             "approval_required",
-            {
-                "id": approval_id,
-                "tool": name,
-                "target": target,
-                "reason": reason,
-                "dangerous": dangerous,
-                "preview": preview,
-                "preview_kind": preview_kind,
-                "timestamp": time.time(),
-            },
+            {**info, "timestamp": time.time()},
         )
 
         try:
@@ -163,6 +182,7 @@ class WebApprover:
             return decision
         finally:
             self._pending.pop(approval_id, None)
+            self._pending_info.pop(approval_id, None)
 
     def resolve(
         self,

@@ -48,3 +48,8 @@ def test_capabilities_payload_includes_aliases_and_shortcuts():
     assert "/quit" in by_name["/exit"]["aliases"]
     keys = {item["key"] for item in payload["shortcuts"]}
     assert {"f1", "f2", "ctrl+p", "meta+k", "ctrl+."} <= keys
+
+
+def test_capabilities_http_matches_registry(web_client):
+    names = {item["name"] for item in web_client.get("/api/capabilities").json()["commands"]}
+    assert names == {spec.name for spec in COMMANDS}

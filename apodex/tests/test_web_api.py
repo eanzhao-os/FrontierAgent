@@ -60,3 +60,40 @@ def test_pyproject_declares_web_runtime_deps():
     text = open("pyproject.toml", encoding="utf-8").read()
     for dep in ("fastapi", "uvicorn", "sse-starlette", "python-multipart"):
         assert dep in text
+
+
+def test_capabilities_match_registry(web_client):
+    from apodex.commands import COMMANDS
+
+    names = {item["name"] for item in web_client.get("/api/capabilities").json()["commands"]}
+    assert names == {spec.name for spec in COMMANDS}
+
+
+def test_state_returns_snapshot_shape(web_client):
+    snap = web_client.get("/api/state").json()
+    assert {"revision", "sequence", "session", "transcript", "pending_approval"} <= set(snap)
+
+
+def test_actions_revision_conflict(web_client, web_manager):
+    web_manager.revision = 4
+    res = web_client.post(
+        "/api/actions",
+        json={"action": "clear_context", "arguments": {}, "expected_revision": 1},
+    )
+    assert res.status_code == 409
+    assert res.json()["code"] == "revision_conflict"
+
+
+def test_unknown_action_is_validation(web_client):
+    res = web_client.post("/api/actions", json={"action": "not_a_thing", "arguments": {}})
+    assert res.status_code == 400
+    assert res.json()["code"] == "validation"
+
+
+def test_snapshot_or_replay_reports_gap(web_manager):
+    from apodex.web_server import snapshot_or_replay
+
+    bus = web_manager.broadcaster
+    bus._history.clear()
+    bus._sequence = 5
+    assert snapshot_or_replay(bus, last_id=1) == "snapshot_required"

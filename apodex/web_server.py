@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
@@ -26,9 +27,11 @@ from sse_starlette.sse import EventSourceResponse
 STATIC_DIR = Path(__file__).resolve().parent / "web_static"
 
 from apodex.cli import apply_model_overrides, publish_model_overrides
+from apodex.commands import capabilities_payload
 from apodex.profiles import get_profile, profile_names, terminal_mode_names
 from apodex.session import TerminalSession, new_session_id
 from apodex.session_actions import ActionResult, HTTP_STATUS, SessionActions
+from apodex.session_snapshot import build_session_snapshot
 from apodex.web_observer import EventBroadcaster, WebApprover, WebEvent, WebObserver, WebRenderer
 
 # Load environment variables
@@ -64,6 +67,33 @@ def action_http(result: ActionResult) -> dict[str, Any]:
     if result.ok:
         return {"status": "ok", **result.data, "message": result.message}
     raise ApiError(result.code, result.message)
+
+
+def snapshot_or_replay(bus: EventBroadcaster, last_id: int) -> str | list[WebEvent]:
+    replayed = bus.replay_after(last_id)
+    if replayed is None:
+        return "snapshot_required"
+    return replayed
+
+
+def _last_event_id(request: Request) -> int | None:
+    raw = request.headers.get("last-event-id")
+    if raw in (None, ""):
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+_DISPATCHABLE_ACTIONS = frozenset({
+    "new_session",
+    "fork_session",
+    "clear_context",
+    "revert_changes",
+    "rename_session",
+    "resume_session",
+})
 
 
 # Enable CORS for Next.js frontend
@@ -103,6 +133,12 @@ class ApproveRequest(BaseModel):
 
 class SteerRequest(BaseModel):
     instruction: str
+
+
+class ActionRequest(BaseModel):
+    action: str
+    arguments: dict[str, Any] = {}
+    expected_revision: int | None = None
 
 
 class WebAgentManager:
@@ -217,6 +253,60 @@ def get_manager() -> WebAgentManager:
     return manager
 
 
+@app.get("/api/capabilities")
+async def get_capabilities() -> dict[str, Any]:
+    return capabilities_payload()
+
+
+@app.get("/api/state")
+async def get_state() -> dict[str, Any]:
+    mgr = get_manager()
+    if not mgr.session:
+        mgr._init_session(mgr.mode)
+    assert mgr.session is not None
+    return build_session_snapshot(
+        mgr.session,
+        revision=mgr.revision,
+        sequence=mgr.broadcaster.sequence,
+        runtime_status="running" if mgr.is_running else "ready",
+        pending_approval=mgr.approver.pending_snapshot(),
+    )
+
+
+@app.post("/api/actions")
+async def post_action(req: ActionRequest) -> dict[str, Any]:
+    mgr = get_manager()
+    async with mgr._lock:
+        if req.action not in _DISPATCHABLE_ACTIONS:
+            raise ApiError("validation", f"unknown action '{req.action}'")
+        if req.expected_revision is not None and req.expected_revision != mgr.revision:
+            raise ApiError("revision_conflict", "session changed; reload snapshot")
+        mgr.require_idle(req.action)
+        if not mgr.session:
+            mgr._init_session(mgr.mode)
+        assert mgr.session is not None
+        actions = SessionActions(mgr.session)
+        args = req.arguments or {}
+        if req.action == "new_session":
+            result = actions.new_session(fork=False)
+            mgr.broadcaster.clear()
+        elif req.action == "fork_session":
+            result = actions.new_session(fork=True)
+        elif req.action == "clear_context":
+            result = actions.clear_context()
+        elif req.action == "revert_changes":
+            result = actions.revert_changes()
+        elif req.action == "rename_session":
+            result = actions.rename_session(str(args.get("name", "")))
+        else:
+            result = actions.resume_session(str(args.get("session_id", "")))
+        payload = action_http(result)
+        mgr.mode = mgr.session.mode
+        mgr.cwd = mgr.session.cwd
+        mgr.revision += 1
+        return payload
+
+
 @app.get("/api/status")
 async def get_status() -> dict[str, Any]:
     mgr = get_manager()
@@ -306,21 +396,36 @@ async def interrupt_task() -> dict[str, Any]:
 @app.get("/api/events")
 async def stream_events(request: Request) -> EventSourceResponse:
     mgr = get_manager()
-    queue = await mgr.broadcaster.subscribe()
+    last_id = _last_event_id(request)
+    gap = last_id is not None and snapshot_or_replay(mgr.broadcaster, last_id) == "snapshot_required"
+    queue = await mgr.broadcaster.subscribe(None if gap else last_id)
 
     async def event_generator() -> AsyncGenerator[dict[str, Any], None]:
         try:
-            # Yield initial connect event
-            yield {
-                "event": "connected",
-                "data": json.dumps({"session_id": mgr.session.session_id if mgr.session else ""}),
-            }
+            if gap:
+                yield {
+                    "event": "snapshot_required",
+                    "data": json.dumps(
+                        {
+                            "type": "snapshot_required",
+                            "data": {"reason": "gap"},
+                            "timestamp": time.time(),
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            elif last_id is None:
+                yield {
+                    "event": "connected",
+                    "data": json.dumps({"session_id": mgr.session.session_id if mgr.session else ""}),
+                }
             while True:
                 if await request.is_disconnected():
                     break
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=15.0)
                     yield {
+                        "id": str(event.sequence),
                         "event": event.event_type,
                         "data": json.dumps(
                             {"type": event.event_type, "data": event.data, "timestamp": event.timestamp},
