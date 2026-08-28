@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 
+def test_web_observer_class_is_gone():
+    import apodex.web_observer as wo
+
+    assert not hasattr(wo, "WebObserver")
+
+
 def test_steer_enqueues_on_inbox(web_manager):
     from apodex.render import Renderer
     from apodex.steer import SteerInbox
@@ -267,3 +273,21 @@ def test_interrupt_resolves_pending_approval(web_manager):
         assert decision.approved is False
 
     asyncio.run(body())
+
+
+def test_config_endpoint_is_secret_free(web_client):
+    res = web_client.get("/api/config")
+    assert res.status_code == 200
+    data = res.json()
+    blob = str(data)
+    assert "api_key" not in blob.lower() or data.get("api_key_configured") in (True, False)
+    assert "sk-" not in blob
+    assert "model" in data
+
+
+def test_context_and_log_endpoints(web_client):
+    context = web_client.get("/api/context")
+    log = web_client.get("/api/log")
+    assert context.status_code == 200
+    assert log.status_code == 200
+    assert "path" in log.json()

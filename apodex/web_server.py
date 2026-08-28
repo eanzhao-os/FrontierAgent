@@ -32,7 +32,7 @@ from apodex.profiles import get_profile, profile_names, terminal_mode_names
 from apodex.session import TerminalSession, new_session_id
 from apodex.session_actions import ActionResult, HTTP_STATUS, SessionActions
 from apodex.session_snapshot import build_session_snapshot
-from apodex.web_observer import EventBroadcaster, WebApprover, WebEvent, WebObserver, WebRenderer
+from apodex.web_observer import EventBroadcaster, WebApprover, WebEvent, WebRenderer
 
 # Load environment variables
 load_dotenv(".env", override=False)
@@ -93,6 +93,13 @@ _DISPATCHABLE_ACTIONS = frozenset({
     "revert_changes",
     "rename_session",
     "resume_session",
+    "set_plan_mode",
+    "set_verbose",
+    "set_auto_approve",
+    "set_auto_for_me",
+    "switch_workflow",
+    "switch_model",
+    "change_cwd",
 })
 
 
@@ -284,6 +291,73 @@ async def get_state() -> dict[str, Any]:
     )
 
 
+def _runtime_config_payload(session: TerminalSession) -> dict[str, Any]:
+    status = session.runtime_config_status()
+    rules = getattr(session, "rules", None)
+    settings = getattr(session, "user_settings", None)
+    return {
+        "ok": bool(status.ok),
+        "mode": status.mode,
+        "profile_name": status.profile_name,
+        "profile_path": status.profile_path,
+        "provider": status.provider,
+        "model": status.model,
+        "endpoint_host": status.endpoint_host,
+        "api_key_env": status.api_key_env,
+        "api_key_configured": status.api_key_configured,
+        "issues": [
+            {
+                "code": issue.code,
+                "message": issue.message,
+                "env_var": issue.env_var,
+                "blocking": issue.blocking,
+            }
+            for issue in status.issues
+        ],
+        "cwd": session.cwd,
+        "models": list(getattr(session, "models", None) or []),
+        "modes": terminal_mode_names(),
+        "verbose": bool(getattr(session, "verbose", False)),
+        "plan_mode": bool(getattr(getattr(session, "plan_state", None), "active", False)),
+        "auto_approve": bool(getattr(getattr(session, "approver", None), "auto_approve", False)),
+        "auto_for_me": bool(getattr(getattr(session, "approver", None), "auto_for_me", False)),
+        "theme": getattr(settings, "theme", "") if settings is not None else "",
+        "permissions": {
+            "allow": sorted(getattr(rules, "allow", set()) or []),
+            "deny": sorted(getattr(rules, "deny", set()) or []),
+        },
+    }
+
+
+@app.get("/api/config")
+async def get_config() -> dict[str, Any]:
+    mgr = get_manager()
+    if not mgr.session:
+        mgr._init_session(mgr.mode)
+    assert mgr.session is not None
+    return _runtime_config_payload(mgr.session)
+
+
+@app.get("/api/context")
+async def get_context() -> dict[str, Any]:
+    mgr = get_manager()
+    if not mgr.session:
+        mgr._init_session(mgr.mode)
+    assert mgr.session is not None
+    result = SessionActions(mgr.session).context_cost()
+    return {"status": "ok", "report": result.message}
+
+
+@app.get("/api/log")
+async def get_log() -> dict[str, Any]:
+    mgr = get_manager()
+    if not mgr.session:
+        mgr._init_session(mgr.mode)
+    assert mgr.session is not None
+    result = SessionActions(mgr.session).trace_path()
+    return {"status": "ok", "path": result.data.get("path", "")}
+
+
 @app.post("/api/actions")
 async def post_action(req: ActionRequest) -> dict[str, Any]:
     mgr = get_manager()
@@ -309,8 +383,25 @@ async def post_action(req: ActionRequest) -> dict[str, Any]:
             result = actions.revert_changes()
         elif req.action == "rename_session":
             result = actions.rename_session(str(args.get("name", "")))
-        else:
+        elif req.action == "resume_session":
             result = actions.resume_session(str(args.get("session_id", "")))
+        elif req.action == "set_plan_mode":
+            result = actions.set_plan_mode(bool(args.get("active")))
+        elif req.action == "set_verbose":
+            enabled = args.get("enabled", args.get("verbose"))
+            result = actions.set_verbose(bool(enabled))
+        elif req.action == "set_auto_approve":
+            enabled = args.get("enabled", args.get("auto_approve"))
+            result = actions.set_auto_approve(bool(enabled))
+        elif req.action == "set_auto_for_me":
+            enabled = args.get("enabled", args.get("auto_for_me"))
+            result = actions.set_auto_for_me(bool(enabled))
+        elif req.action == "switch_workflow":
+            result = actions.switch_workflow(str(args.get("mode") or args.get("name") or ""))
+        elif req.action == "switch_model":
+            result = actions.switch_model(str(args.get("model") or args.get("target") or ""))
+        else:
+            result = actions.change_cwd(str(args.get("path") or args.get("cwd") or ""))
         payload = action_http(result)
         mgr.mode = mgr.session.mode
         mgr.cwd = mgr.session.cwd

@@ -1,45 +1,20 @@
-"""WebObserver, WebApprover, and WebRenderer for FrontierAgent.
+"""WebApprover and WebRenderer for FrontierAgent.
 
-Bridges the FrontierAgent loop, ReAct workflows, and Agent Team coordination
-to real-time Server-Sent Events (SSE) and HTTP REST APIs.
+Bridges session rendering and human-in-the-loop approvals to Server-Sent Events.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import logging
-import os
 import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
-from apodex.agent_tools import (
-    MUTATING_TOOLS,
-    RISK_DENY,
-    RISK_SAFE,
-    assess_with_rules,
-    is_mutating_tool,
-    localize_path_args,
-)
-from apodex.diff_preview import change_stats, unified_diff
 from apodex.observers import Decision
 from apodex.render import Renderer
-from frontier_agent.core.loop_types import (
-    BaseObserver,
-    Intervention,
-    LLMDeltaContext,
-    LoopConfig,
-    ToolCallIntervention,
-    ToolResult,
-    TurnContext,
-)
-
-logger = logging.getLogger(__name__)
-
-_DIFF_TOOLS = frozenset({"write_file", "file_editor_create", "file_editor_str_replace"})
 
 
 @dataclass
@@ -483,189 +458,3 @@ class WebRenderer(Renderer):
             "subagent_status",
             {"snapshots": snapshots, "done": done, "timeout_s": timeout_s},
         )
-
-
-class WebObserver(BaseObserver):
-    """Observer hooking into `run_agent_loop` and Agent Team workflows."""
-
-    critical = True
-    wants_llm_delta = True
-
-    def __init__(
-        self,
-        broadcaster: EventBroadcaster,
-        approver: WebApprover,
-        cwd: str,
-        journal: Any = None,
-        plan_state: Any = None,
-        steer_inbox: Any = None,
-        rules: Any = None,
-    ) -> None:
-        self.broadcaster = broadcaster
-        self.approver = approver
-        self.cwd = cwd
-        self.journal = journal
-        self.plan_state = plan_state
-        self.steer_inbox = steer_inbox
-        self.rules = rules
-
-        self._activity_sequence = 0
-        self._turn_streamed = False
-        self._current_thinking = ""
-        self._current_content = ""
-        self._journal_scan: tuple[list[str], Any] | None = None
-        self._journal_scan_lock = asyncio.Lock()
-
-    async def on_loop_start(self, config: LoopConfig) -> None:
-        await self.broadcaster.emit(
-            "status",
-            {"state": "running", "role": config.role_id, "max_turns": config.max_turns},
-        )
-
-    async def on_llm_delta(self, ctx: LLMDeltaContext) -> Intervention | None:
-        self._turn_streamed = True
-        thinking_delta = getattr(ctx, "thinking_delta", "")
-        if thinking_delta:
-            self._current_thinking += thinking_delta
-            await self.broadcaster.emit(
-                "thinking_delta",
-                {"delta": thinking_delta, "accumulated": self._current_thinking},
-            )
-        if ctx.delta:
-            self._current_content += ctx.delta
-            await self.broadcaster.emit(
-                "content_delta",
-                {"delta": ctx.delta, "accumulated": self._current_content},
-            )
-        return None
-
-    async def on_llm_response(self, ctx: TurnContext) -> Intervention | None:
-        if not self._turn_streamed:
-            await self.broadcaster.emit(
-                "turn_fallback",
-                {"text": ctx.ai_text or "", "thinking": ctx.thinking or ""},
-            )
-        else:
-            await self.broadcaster.emit(
-                "turn_complete",
-                {"text": self._current_content, "thinking": self._current_thinking},
-            )
-        self._turn_streamed = False
-        self._current_thinking = ""
-        self._current_content = ""
-        return None
-
-    async def on_tool_call(
-        self, ctx: TurnContext, tool_call: dict[str, Any],
-    ) -> ToolCallIntervention | None:
-        name = tool_call.get("name", "")
-        args = tool_call.get("args", {}) or {}
-        self._activity_sequence += 1
-        call_id = str(tool_call.get("id") or f"web-{ctx.turn}-{self._activity_sequence}")
-
-        rewritten = localize_path_args(name, args, self.cwd)
-        eff_args = rewritten if rewritten is not None else args
-
-        risk = assess_with_rules(
-            name,
-            eff_args,
-            self.cwd,
-            self.rules,
-            auto_for_me=getattr(self.approver, "auto_for_me", False),
-        )
-
-        preview = ""
-        preview_kind = ""
-        if name in _DIFF_TOOLS:
-            diff = unified_diff(name, eff_args, self.cwd)
-            if diff:
-                preview, preview_kind = diff, "diff"
-                await self.broadcaster.emit("diff_preview", {"diff": diff, "target": name})
-        elif name == "bash":
-            cmd = str(eff_args.get("command", "")).strip()
-            if cmd:
-                preview, preview_kind = cmd, "command"
-
-        await self.broadcaster.emit(
-            "tool_call",
-            {
-                "call_id": call_id,
-                "name": name,
-                "args": eff_args,
-                "risk_reason": risk.danger or ("" if risk.level == RISK_SAFE else risk.reason),
-                "danger": bool(risk.danger),
-                "preview": preview,
-                "preview_kind": preview_kind,
-                "status": "running",
-            },
-        )
-
-        if risk.level == RISK_DENY:
-            await self.broadcaster.emit(
-                "note", {"text": f"✗ blocked by policy: {risk.reason}"}
-            )
-            return ToolCallIntervention(
-                skip_with_result=f"[blocked by safety policy: {risk.reason}]"
-            )
-
-        if risk.level != RISK_SAFE:
-            decision = await self.approver.confirm(
-                name,
-                risk.target,
-                risk.reason,
-                dangerous=risk.danger,
-                preview=preview,
-                preview_kind=preview_kind,
-            )
-            if not decision.approved:
-                if decision.feedback:
-                    await self.broadcaster.emit(
-                        "note", {"text": f"↳ redirecting {name}: {decision.feedback}"}
-                    )
-                    return ToolCallIntervention(
-                        skip_with_result=(
-                            f"[The user declined to run this {name} call. "
-                            f"Follow their instruction instead: {decision.feedback}]"
-                        )
-                    )
-                await self.broadcaster.emit(
-                    "note", {"text": f"✗ rejected {name} by user"}
-                )
-                return ToolCallIntervention(
-                    skip_with_result=f"[user rejected this {name} call]"
-                )
-            if decision.remember and self.rules is not None:
-                self.rules.allow_command(risk.target)
-
-        return None
-
-    async def on_tool_result(self, ctx: TurnContext, result: ToolResult) -> None:
-        await self.broadcaster.emit(
-            "tool_result",
-            {
-                "call_id": getattr(result, "call_id", f"res-{self._activity_sequence}"),
-                "name": result.name,
-                "result": str(result.result)[:4000],
-                "is_error": result.is_error,
-                "duration_ms": result.duration_ms,
-                "status": "error" if result.is_error else "completed",
-            },
-        )
-
-    def on_subagent_status(
-        self,
-        snapshots: list[dict[str, Any]],
-        *,
-        done: bool = False,
-        timeout_s: int = 0,
-    ) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(
-                self.broadcaster.emit(
-                    "subagent_status",
-                    {"snapshots": snapshots, "done": done, "timeout_s": timeout_s},
-                )
-            )
-        except RuntimeError:
-            pass

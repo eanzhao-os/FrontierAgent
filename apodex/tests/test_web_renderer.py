@@ -3,6 +3,12 @@ import asyncio
 from apodex.web_observer import EventBroadcaster, WebRenderer
 
 
+def test_web_observer_class_is_gone():
+    import apodex.web_observer as wo
+
+    assert not hasattr(wo, "WebObserver")
+
+
 async def _collect(renderer, fn):
     bus = renderer.broadcaster
     q = await bus.subscribe(None)
