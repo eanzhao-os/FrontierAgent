@@ -59,6 +59,14 @@ class ModeRequest(BaseModel):
     mode: str
 
 
+class NewSessionRequest(BaseModel):
+    mode: str = "react"
+
+
+class WorkspaceRequest(BaseModel):
+    path: str
+
+
 class ApproveRequest(BaseModel):
     id: str
     approved: bool
@@ -317,20 +325,95 @@ async def get_diff() -> dict[str, Any]:
     return {"stats": stats}
 
 
+def normalize_session_id(sid: Optional[str]) -> Optional[str]:
+    if not sid:
+        return None
+    return sid.strip().replace(" ", "+")
+
+
 @app.get("/api/artifacts")
-async def list_artifacts() -> dict[str, Any]:
+async def list_artifacts(session_id: Optional[str] = None) -> dict[str, Any]:
+    from apodex.session_state import discover_all_run_roots, load_session_state
+
     mgr = get_manager()
-    if not mgr.session:
-        return {"artifacts": []}
-    outputs_dir = Path(mgr.cwd) / ".apodex" / "runs" / mgr.session.session_id / "outputs"
+    raw_sid = normalize_session_id(session_id)
+    sid = raw_sid or (mgr.session.session_id if mgr.session else None)
+    if not sid:
+        return {"artifacts": [], "session_id": None}
+
+    # Locate the exact run directory for this session
+    state = load_session_state(sid) or {}
+    run_dir = None
+    if "_run_dir" in state and Path(state["_run_dir"]).is_dir():
+        run_dir = Path(state["_run_dir"])
+    if not run_dir:
+        for root in discover_all_run_roots():
+            candidate = root / sid
+            if candidate.is_dir():
+                run_dir = candidate
+                break
+    if not run_dir:
+        run_dir = Path(mgr.cwd) / ".apodex" / "runs" / sid
+
     artifacts: list[dict[str, Any]] = []
-    if outputs_dir.exists():
-        for p in outputs_dir.rglob("*"):
+    outputs_dir = run_dir / "outputs"
+
+    if outputs_dir.exists() and outputs_dir.is_dir():
+        for p in sorted(outputs_dir.rglob("*")):
             if p.is_file():
-                rel = str(p.relative_to(outputs_dir))
-                size = p.stat().st_size
-                artifacts.append({"name": rel, "size": size, "path": str(p)})
-    return {"artifacts": artifacts}
+                if p.name in (".DS_Store", "__pycache__", "session.json", "engine.log", "trace.jsonl"):
+                    continue
+                artifacts.append({
+                    "name": str(p.relative_to(outputs_dir)),
+                    "category": "outputs",
+                    "size": p.stat().st_size,
+                    "path": str(p.resolve()),
+                    "is_md": p.suffix.lower() in (".md", ".markdown"),
+                    "session_id": sid,
+                    "modified_at": p.stat().st_mtime,
+                })
+
+    # Sort newest first
+    artifacts.sort(key=lambda a: -a["modified_at"])
+
+    return {"artifacts": artifacts, "session_id": sid}
+
+
+@app.get("/api/file")
+async def read_file_content(path: str) -> dict[str, Any]:
+    from apodex.session_state import _real_user_home, discover_all_run_roots
+
+    mgr = get_manager()
+    file_path = Path(path).resolve()
+
+    cwd_path = Path(mgr.cwd).resolve()
+    real_home = _real_user_home()
+    allowed_roots = [cwd_path, real_home / ".apodex", real_home] + discover_all_run_roots()
+
+    is_safe = False
+    for allowed in allowed_roots:
+        try:
+            file_path.relative_to(allowed.resolve())
+            is_safe = True
+            break
+        except ValueError:
+            pass
+
+    if not is_safe or not file_path.is_file():
+        raise HTTPException(status_code=403, detail="Access denied or file not found.")
+
+    try:
+        content = file_path.read_text(encoding="utf-8", errors="replace")
+        is_md = file_path.suffix.lower() in (".md", ".markdown")
+        return {
+            "name": file_path.name,
+            "path": str(file_path),
+            "content": content,
+            "is_md": is_md,
+            "size": file_path.stat().st_size,
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not read file: {exc}")
 
 
 @app.post("/api/revert")
@@ -358,7 +441,7 @@ async def clear_session() -> dict[str, Any]:
 
 @app.get("/api/sessions")
 async def list_all_sessions() -> dict[str, Any]:
-    from apodex.session_state import list_saved_sessions, load_session_state
+    from apodex.session_state import discover_all_run_roots, list_saved_sessions, load_session_state
 
     mgr = get_manager()
     saved = list_saved_sessions(workspace=mgr.cwd)
@@ -366,20 +449,39 @@ async def list_all_sessions() -> dict[str, Any]:
     for s in saved:
         sid = s["session_id"]
         detail = load_session_state(sid) or {}
-        outputs_dir = Path(mgr.cwd) / ".apodex" / "runs" / sid / "outputs"
-        out_count = len(list(outputs_dir.rglob("*"))) if outputs_dir.exists() else 0
+        
+        # Locate run dir
+        run_dir_str = s.get("run_dir") or detail.get("_run_dir")
+        run_dir = Path(run_dir_str) if run_dir_str else None
+        if not run_dir or not run_dir.is_dir():
+            for root in discover_all_run_roots():
+                candidate = root / sid
+                if candidate.is_dir():
+                    run_dir = candidate
+                    break
+        if not run_dir:
+            run_dir = Path(mgr.cwd) / ".apodex" / "runs" / sid
+
+        outputs_dir = run_dir / "outputs"
+        out_count = len([p for p in outputs_dir.rglob("*") if p.is_file() and p.name not in (".DS_Store", "__pycache__")]) if outputs_dir.exists() else 0
         journal = detail.get("journal", {})
         file_count = len(journal) if isinstance(journal, dict) else 0
+
+        # Workspace name
+        ws_name = Path(s.get("cwd") or mgr.cwd).name
+
         results.append({
             "session_id": sid,
             "name": s.get("name") or "",
             "mode": s.get("mode") or "react",
-            "cwd": s.get("cwd") or mgr.cwd,
+            "cwd": s.get("cwd") or str(run_dir.parent.parent),
+            "workspace_name": ws_name,
             "message_count": s.get("message_count", 0),
             "modified_at": s.get("modified_at", ""),
             "model": detail.get("model", ""),
             "file_count": file_count,
             "outputs_count": out_count,
+            "run_dir": str(run_dir.resolve()),
             "is_current": bool(mgr.session and mgr.session.session_id == sid),
         })
     return {"sessions": results}
@@ -387,26 +489,56 @@ async def list_all_sessions() -> dict[str, Any]:
 
 @app.get("/api/sessions/{session_id}")
 async def get_session_detail(session_id: str) -> dict[str, Any]:
-    from apodex.session_state import load_session_state
+    from apodex.session_state import discover_all_run_roots, load_session_state
 
     mgr = get_manager()
+    session_id = normalize_session_id(session_id) or session_id
     state = load_session_state(session_id)
     if not state:
         raise HTTPException(status_code=404, detail="Session not found")
-    outputs_dir = Path(mgr.cwd) / ".apodex" / "runs" / session_id / "outputs"
-    outputs = []
+
+    run_dir_str = state.get("_run_dir")
+    run_dir = Path(run_dir_str) if run_dir_str else None
+    if not run_dir or not run_dir.is_dir():
+        for root in discover_all_run_roots():
+            candidate = root / session_id
+            if candidate.is_dir():
+                run_dir = candidate
+                break
+    if not run_dir:
+        run_dir = Path(mgr.cwd) / ".apodex" / "runs" / session_id
+
+    outputs_dir = run_dir / "outputs"
+    workspace_dir = run_dir / "workspace"
+
+    outputs: list[dict[str, Any]] = []
     if outputs_dir.exists():
-        for p in outputs_dir.rglob("*"):
-            if p.is_file():
+        for p in sorted(outputs_dir.rglob("*")):
+            if p.is_file() and p.name not in (".DS_Store", "__pycache__"):
                 outputs.append({
                     "name": str(p.relative_to(outputs_dir)),
                     "size": p.stat().st_size,
-                    "path": str(p),
+                    "path": str(p.resolve()),
+                    "is_md": p.suffix.lower() in (".md", ".markdown"),
                 })
+
+    workspace_files: list[dict[str, Any]] = []
+    if workspace_dir.exists():
+        for p in sorted(workspace_dir.rglob("*")):
+            if p.is_file() and p.name not in (".DS_Store", "__pycache__"):
+                workspace_files.append({
+                    "name": str(p.relative_to(workspace_dir)),
+                    "size": p.stat().st_size,
+                    "path": str(p.resolve()),
+                    "is_md": p.suffix.lower() in (".md", ".markdown"),
+                })
+
     return {
         "session_id": session_id,
         "state": state,
         "outputs": outputs,
+        "workspace_files": workspace_files,
+        "run_dir": str(run_dir.resolve()),
     }
 
 
@@ -417,21 +549,115 @@ async def resume_saved_session(session_id: str) -> dict[str, Any]:
     mgr = get_manager()
     if mgr.is_running:
         raise HTTPException(status_code=400, detail="Cannot resume while agent is running.")
+    session_id = normalize_session_id(session_id) or session_id
     state = load_session_state(session_id)
     if not state:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    if state.get("cwd") and Path(state["cwd"]).is_dir():
+        mgr.cwd = str(Path(state["cwd"]).resolve())
+
     if not mgr.session:
         mgr._init_session(state.get("mode", "react"), session_id=session_id)
     assert mgr.session is not None
+    mgr.session.cwd = mgr.cwd
     mgr.session.switch_session(state, fallback_id=session_id)
     mgr.mode = mgr.session.mode
-    await mgr.broadcaster.emit("session_resumed", {"session_id": session_id, "mode": mgr.mode})
-    return {"status": "ok", "session_id": session_id, "mode": mgr.mode}
+    await mgr.broadcaster.emit("session_resumed", {"session_id": session_id, "mode": mgr.mode, "cwd": mgr.cwd})
+    return {"status": "ok", "session_id": session_id, "mode": mgr.mode, "cwd": mgr.cwd}
+
+
+@app.post("/api/sessions/new")
+async def create_new_session(req: NewSessionRequest) -> dict[str, Any]:
+    mgr = get_manager()
+    if mgr.is_running:
+        raise HTTPException(status_code=400, detail="Cannot create new session while a task is running.")
+    mode = req.mode if req.mode in terminal_mode_names() else "react"
+    mgr._init_session(mode)
+    mgr.broadcaster.clear()
+    await mgr.broadcaster.emit("session_created", {"session_id": mgr.session.session_id, "mode": mgr.mode})
+    return {"status": "ok", "session_id": mgr.session.session_id, "mode": mgr.mode}
+
+
+@app.get("/api/workspaces")
+async def list_workspaces() -> dict[str, Any]:
+    from apodex.workspace_config import load_configured_paths
+
+    mgr = get_manager()
+    configured = load_configured_paths()
+    results: list[dict[str, Any]] = []
+
+    for path_str in configured:
+        p = Path(path_str).resolve()
+        runs_dir = p / ".apodex" / "runs"
+        count = len(list(runs_dir.glob("*/session.json"))) if runs_dir.is_dir() else 0
+        results.append({
+            "path": str(p),
+            "name": p.name or str(p),
+            "exists": p.is_dir(),
+            "session_count": count,
+            "is_active": str(p) == str(Path(mgr.cwd).resolve()),
+        })
+
+    return {"workspaces": results, "active_cwd": str(Path(mgr.cwd).resolve())}
+
+
+@app.post("/api/workspaces/add")
+async def add_workspace(req: WorkspaceRequest) -> dict[str, Any]:
+    from apodex.workspace_config import add_workspace_path
+
+    path_str = os.path.expanduser(req.path.strip())
+    p = Path(path_str).resolve()
+    if not p.exists():
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Cannot create directory: {exc}")
+
+    add_workspace_path(str(p))
+    mgr = get_manager()
+    await mgr.broadcaster.emit("workspaces_updated", {"added": str(p)})
+    return {"status": "ok", "path": str(p)}
+
+
+@app.post("/api/workspaces/remove")
+async def remove_workspace(req: WorkspaceRequest) -> dict[str, Any]:
+    from apodex.workspace_config import remove_workspace_path
+
+    mgr = get_manager()
+    path_str = os.path.expanduser(req.path.strip())
+    p = Path(path_str).resolve()
+    if str(p) == str(Path(mgr.cwd).resolve()):
+        raise HTTPException(status_code=400, detail="Cannot remove currently active workspace.")
+
+    remove_workspace_path(str(p))
+    await mgr.broadcaster.emit("workspaces_updated", {"removed": str(p)})
+    return {"status": "ok", "path": str(p)}
+
+
+@app.post("/api/workspaces/select")
+async def select_active_workspace(req: WorkspaceRequest) -> dict[str, Any]:
+    from apodex.workspace_config import add_workspace_path
+
+    mgr = get_manager()
+    if mgr.is_running:
+        raise HTTPException(status_code=400, detail="Cannot switch workspace while a task is running.")
+
+    path_str = os.path.expanduser(req.path.strip())
+    p = Path(path_str).resolve()
+    if not p.is_dir():
+        raise HTTPException(status_code=404, detail="Workspace directory does not exist.")
+
+    add_workspace_path(str(p))
+    mgr.cwd = str(p)
+    mgr._init_session(mgr.mode)
+    await mgr.broadcaster.emit("workspace_changed", {"cwd": mgr.cwd, "session_id": mgr.session.session_id})
+    return {"status": "ok", "cwd": mgr.cwd, "session_id": mgr.session.session_id}
 
 
 @app.get("/api/all_files")
 async def get_all_work_files() -> dict[str, Any]:
-    from apodex.session_state import list_saved_sessions, load_session_state
+    from apodex.session_state import discover_all_run_roots, list_saved_sessions, load_session_state
 
     mgr = get_manager()
     saved = list_saved_sessions(workspace=mgr.cwd)
@@ -449,15 +675,28 @@ async def get_all_work_files() -> dict[str, Any]:
                     "modified_at": s.get("modified_at"),
                     "mode": s.get("mode"),
                 })
-        out_dir = Path(mgr.cwd) / ".apodex" / "runs" / sid / "outputs"
+        
+        run_dir_str = s.get("run_dir") or state.get("_run_dir")
+        run_dir = Path(run_dir_str) if run_dir_str else None
+        if not run_dir or not run_dir.is_dir():
+            for root in discover_all_run_roots():
+                candidate = root / sid
+                if candidate.is_dir():
+                    run_dir = candidate
+                    break
+        if not run_dir:
+            run_dir = Path(mgr.cwd) / ".apodex" / "runs" / sid
+
+        out_dir = run_dir / "outputs"
         if out_dir.exists():
             for p in out_dir.rglob("*"):
-                if p.is_file():
+                if p.is_file() and p.name not in (".DS_Store", "__pycache__"):
                     all_outputs.append({
                         "session_id": sid,
                         "name": str(p.relative_to(out_dir)),
                         "size": p.stat().st_size,
-                        "path": str(p),
+                        "path": str(p.resolve()),
+                        "is_md": p.suffix.lower() in (".md", ".markdown"),
                         "modified_at": s.get("modified_at"),
                     })
     return {"journal_files": all_files, "artifacts": all_outputs}
