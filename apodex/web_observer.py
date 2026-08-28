@@ -210,6 +210,31 @@ class WebRenderer(Renderer):
         self.broadcaster = broadcaster
         self._current_thinking = ""
         self._current_content = ""
+        self.phase = "idle"
+        self.queued_count = 0
+        self.tool_count = 0
+        self.current_tool = ""
+        self.elapsed_seconds = None
+        self._task_started_at: float | None = None
+        self.activity: list[dict[str, Any]] = []
+        self.activity_totals: dict[str, int] = {"calls": 0, "success": 0, "failed": 0}
+        self.todo_items: list[dict[str, str]] = []
+        self.plan_text = ""
+        self.plan_items: list[dict[str, Any]] = []
+        self.subagents: list[dict[str, Any]] = []
+
+    def presentation_state(self) -> dict[str, Any]:
+        elapsed = None
+        if self._task_started_at is not None:
+            elapsed = int(time.time() - self._task_started_at)
+        self.elapsed_seconds = elapsed
+        return {
+            "phase": self.phase,
+            "elapsed_seconds": elapsed,
+            "tool_count": self.tool_count,
+            "queued": self.queued_count,
+            "current_tool": self.current_tool,
+        }
 
     def _sync_emit(self, event_type: str, data: dict[str, Any]) -> None:
         try:
@@ -218,8 +243,25 @@ class WebRenderer(Renderer):
         except RuntimeError:
             pass
 
+    def _set_phase(self, phase: str, *, tool: str | None = None) -> None:
+        changed = self.phase != phase
+        self.phase = phase
+        if tool is not None and self.current_tool != tool:
+            self.current_tool = tool
+            changed = True
+        if self._task_started_at is None and phase not in {"idle", "done", "incomplete", "interrupted", "error"}:
+            self._task_started_at = time.time()
+            changed = True
+        if changed:
+            self._sync_emit("presentation", self.presentation_state())
+
+    def _append_activity(self, record: dict[str, Any]) -> None:
+        self.activity.append(record)
+        if len(self.activity) > 100:
+            self.activity = self.activity[-100:]
+
     def set_usage(self, usage: Any, window: int) -> None:
-        super().set_usage(usage, window)
+        self._usage = usage
         self._sync_emit(
             "usage",
             {
@@ -231,17 +273,20 @@ class WebRenderer(Renderer):
         )
 
     def working_on(self, message: str = "Thinking...") -> None:
+        self._set_phase("thinking")
         self._sync_emit("status", {"state": "thinking", "message": message})
 
     def working_off(self) -> None:
-        pass
+        return
 
     def thinking_delta(self, delta: str) -> None:
         self._current_thinking += delta
+        self._set_phase("thinking")
         self._sync_emit("thinking_delta", {"delta": delta, "accumulated": self._current_thinking})
 
     def content_delta(self, delta: str) -> None:
         self._current_content += delta
+        self._set_phase("responding")
         self._sync_emit("content_delta", {"delta": delta, "accumulated": self._current_content})
 
     def turn_text_fallback(self, text: str, thinking: str = "") -> None:
@@ -266,6 +311,11 @@ class WebRenderer(Renderer):
         *,
         call_id: str = "",
     ) -> None:
+        from apodex.task_projection import project_task_board
+
+        self.tool_count += 1
+        self._set_phase("running_tool", tool=name)
+        self._sync_emit("presentation", self.presentation_state())
         self._sync_emit(
             "tool_call",
             {
@@ -277,6 +327,9 @@ class WebRenderer(Renderer):
                 "status": "executing",
             },
         )
+        if name in {"add_task", "update_task"}:
+            self.plan_items = project_task_board(name, args or {}, self.plan_items)
+            self._sync_emit("plan", {"items": self.plan_items})
 
     def tool_result(
         self,
@@ -287,6 +340,7 @@ class WebRenderer(Renderer):
         is_error: bool = False,
         ms: int = 0,
     ) -> None:
+        self._set_phase("thinking", tool="")
         self._sync_emit(
             "tool_result",
             {
@@ -299,6 +353,71 @@ class WebRenderer(Renderer):
             },
         )
 
+    def activity_call(self, name: str, args: dict, *, call_id: str = "") -> None:
+        record = {
+            "call_id": call_id,
+            "name": name,
+            "args": args,
+            "state": "running",
+        }
+        self.activity_totals["calls"] += 1
+        self._append_activity(record)
+        self._sync_emit("activity_call", record)
+
+    def activity_result(
+        self,
+        name: str,
+        result: Any = "",
+        *,
+        call_id: str = "",
+        is_error: bool = False,
+        ms: int = 0,
+        outcome: str = "",
+    ) -> None:
+        state = "failed" if is_error else "success"
+        self.activity_totals["failed" if is_error else "success"] += 1
+        payload = {
+            "call_id": call_id,
+            "name": name,
+            "result": result,
+            "is_error": is_error,
+            "ms": ms,
+            "outcome": outcome,
+            "state": state,
+        }
+        for rec in reversed(self.activity):
+            if rec.get("call_id") == call_id or (
+                not call_id and rec.get("name") == name and rec.get("state") == "running"
+            ):
+                rec["state"] = state
+                rec["ms"] = ms
+                rec["is_error"] = is_error
+                break
+        self._sync_emit("activity_result", payload)
+
+    def todos(self, items: list) -> None:
+        from apodex.task_projection import project_todos
+
+        self.todo_items = project_todos(items)
+        self._sync_emit("todos", {"items": self.todo_items})
+
+    def plan_review(self, plan: str) -> None:
+        self.plan_text = plan
+        self._set_phase("awaiting_approval")
+        self._sync_emit("plan_review", {"plan": plan})
+
+    def queued(self, text: str) -> None:
+        self.queued_count += 1
+        self._sync_emit("presentation", self.presentation_state())
+        self._sync_emit("queued", {"text": text})
+
+    def llm_failure(self, msg: str, *, configuration_error: bool = False) -> None:
+        self._set_phase("error")
+        self._sync_emit(
+            "llm_failure",
+            {"message": msg, "configuration_error": configuration_error},
+        )
+
     def diff_preview(self, diff: str, *, stats: Any = None) -> None:
         self._sync_emit("diff_preview", {"diff": diff, "stats": str(stats) if stats else ""})
 
@@ -306,9 +425,11 @@ class WebRenderer(Renderer):
         self._sync_emit("note", {"text": text})
 
     def error(self, text: str) -> None:
+        self._set_phase("error")
         self._sync_emit("error", {"message": text})
 
     def final(self, text: str, *, turns: int = 0, tool_calls: int = 0, stopped_by: str = "") -> None:
+        self._set_phase("done")
         self._sync_emit(
             "final_answer",
             {
@@ -321,6 +442,8 @@ class WebRenderer(Renderer):
         )
 
     def incomplete(self, text: str, *, turns: int = 0, tool_calls: int = 0, stopped_by: str = "") -> None:
+        phase = "interrupted" if stopped_by == "interrupt" else "incomplete"
+        self._set_phase(phase)
         self._sync_emit(
             "final_answer",
             {
@@ -342,6 +465,7 @@ class WebRenderer(Renderer):
         done: bool = False,
         timeout_s: int = 0,
     ) -> None:
+        self.subagents = list(snapshots)
         self._sync_emit(
             "subagent_status",
             {"snapshots": snapshots, "done": done, "timeout_s": timeout_s},
