@@ -47,13 +47,14 @@ class WebEvent:
     event_type: str
     data: dict[str, Any]
     timestamp: float = field(default_factory=time.time)
+    sequence: int = 0
 
     def to_sse(self) -> str:
         payload = json.dumps(
             {"type": self.event_type, "data": self.data, "timestamp": self.timestamp},
             ensure_ascii=False,
         )
-        return f"event: {self.event_type}\ndata: {payload}\n\n"
+        return f"id: {self.sequence}\nevent: {self.event_type}\ndata: {payload}\n\n"
 
 
 class EventBroadcaster:
@@ -63,13 +64,30 @@ class EventBroadcaster:
         self._subscribers: set[asyncio.Queue[WebEvent]] = set()
         self._history: deque[WebEvent] = deque(maxlen=max_history)
         self._lock = asyncio.Lock()
+        self._sequence = 0
 
-    async def subscribe(self) -> asyncio.Queue[WebEvent]:
+    @property
+    def sequence(self) -> int:
+        return self._sequence
+
+    def replay_after(self, last_id: int) -> list[WebEvent] | None:
+        if self._history:
+            oldest = self._history[0].sequence
+            if last_id < oldest:
+                return None
+            return [event for event in self._history if event.sequence > last_id]
+        if last_id < self._sequence:
+            return None
+        return []
+
+    async def subscribe(self, last_id: int | None = None) -> asyncio.Queue[WebEvent]:
         q: asyncio.Queue[WebEvent] = asyncio.Queue()
         async with self._lock:
-            # Replay recent events for new connection
-            for ev in self._history:
-                await q.put(ev)
+            if last_id is not None:
+                replayed = self.replay_after(last_id)
+                if replayed is not None:
+                    for ev in replayed:
+                        await q.put(ev)
             self._subscribers.add(q)
         return q
 
@@ -77,9 +95,10 @@ class EventBroadcaster:
         async with self._lock:
             self._subscribers.discard(q)
 
-    async def emit(self, event_type: str, data: dict[str, Any]) -> None:
-        event = WebEvent(event_type=event_type, data=data)
+    async def emit(self, event_type: str, data: dict[str, Any]) -> WebEvent:
         async with self._lock:
+            self._sequence += 1
+            event = WebEvent(event_type=event_type, data=data, sequence=self._sequence)
             self._history.append(event)
             dead: list[asyncio.Queue[WebEvent]] = []
             for q in self._subscribers:
@@ -89,6 +108,7 @@ class EventBroadcaster:
                     dead.append(q)
             for q in dead:
                 self._subscribers.discard(q)
+        return event
 
     def clear(self) -> None:
         self._history.clear()
