@@ -28,6 +28,7 @@ STATIC_DIR = Path(__file__).resolve().parent / "web_static"
 from apodex.cli import apply_model_overrides, publish_model_overrides
 from apodex.profiles import get_profile, profile_names, terminal_mode_names
 from apodex.session import TerminalSession, new_session_id
+from apodex.session_actions import ActionResult, HTTP_STATUS, SessionActions
 from apodex.web_observer import EventBroadcaster, WebApprover, WebEvent, WebObserver, WebRenderer
 
 # Load environment variables
@@ -39,6 +40,31 @@ if found_env:
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="FrontierAgent Web API", version="0.1.0")
+
+
+class ApiError(Exception):
+    """HTTP error whose JSON body is `{status, code, message}` at the top level."""
+
+    def __init__(self, code: str, message: str, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status_code = HTTP_STATUS.get(code, 500) if status_code is None else status_code
+
+
+@app.exception_handler(ApiError)
+async def api_error_handler(_request: Request, exc: ApiError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"status": "error", "code": exc.code, "message": exc.message},
+    )
+
+
+def action_http(result: ActionResult) -> dict[str, Any]:
+    if result.ok:
+        return {"status": "ok", **result.data, "message": result.message}
+    raise ApiError(result.code, result.message)
+
 
 # Enable CORS for Next.js frontend
 app.add_middleware(
@@ -80,6 +106,8 @@ class SteerRequest(BaseModel):
 
 
 class WebAgentManager:
+    BUSY_ALLOWED = frozenset({"steer", "interrupt", "approve"})
+
     def __init__(self, initial_mode: str = "react", cwd: Optional[str] = None) -> None:
         self.cwd = os.path.abspath(cwd or os.getcwd())
         self.mode = initial_mode if initial_mode in terminal_mode_names() else "react"
@@ -89,6 +117,8 @@ class WebAgentManager:
         self.active_task: Optional[asyncio.Task[None]] = None
         self.is_running = False
         self.session: Optional[TerminalSession] = None
+        self.revision = 0
+        self._lock = asyncio.Lock()
         self._init_session(self.mode)
 
     def _init_session(self, mode: str, session_id: Optional[str] = None) -> None:
@@ -157,12 +187,14 @@ class WebAgentManager:
         self.active_task = asyncio.create_task(_execute())
 
     def steer(self, instruction: str) -> bool:
-        if not self.is_running or not self.session:
+        if not self.is_running or not self.session or self.session._inbox is None:
             return False
-        if hasattr(self.session, "_inbox") and self.session._inbox is not None:
-            self.session._inbox.steer(instruction)
-            return True
-        return False
+        self.session._inbox.enqueue(instruction)
+        return True
+
+    def require_idle(self, action: str) -> None:
+        if self.is_running and action not in self.BUSY_ALLOWED:
+            raise ApiError("busy", "A task is running. Interrupt first.")
 
     def interrupt(self) -> bool:
         if self.is_running and self.active_task and not self.active_task.done():
@@ -236,11 +268,13 @@ async def run_task(req: RunRequest) -> dict[str, Any]:
 @app.post("/api/steer")
 async def steer_task(req: SteerRequest) -> dict[str, Any]:
     mgr = get_manager()
-    success = mgr.steer(req.instruction)
-    if success:
-        await mgr.broadcaster.emit("steer_injected", {"instruction": req.instruction})
-        return {"status": "ok", "injected": True}
-    return {"status": "ignored", "injected": False, "reason": "No running task or inbox"}
+    async with mgr._lock:
+        success = mgr.steer(req.instruction)
+        if success:
+            mgr.revision += 1
+            await mgr.broadcaster.emit("steer_injected", {"instruction": req.instruction})
+            return {"status": "ok", "injected": True}
+        return {"status": "ignored", "injected": False, "reason": "No running task or inbox"}
 
 
 @app.post("/api/approve")
@@ -419,24 +453,27 @@ async def read_file_content(path: str) -> dict[str, Any]:
 @app.post("/api/revert")
 async def revert_changes() -> dict[str, Any]:
     mgr = get_manager()
-    if not mgr.session or not mgr.session.journal:
-        return {"status": "noop"}
-    reverted = mgr.session.journal.revert()
-    await mgr.broadcaster.emit("revert", {"reverted_files": reverted})
-    return {"status": "ok", "reverted": reverted}
+    async with mgr._lock:
+        mgr.require_idle("revert")
+        if not mgr.session or not mgr.session.journal:
+            return {"status": "noop"}
+        result = SessionActions(mgr.session).revert_changes()
+        mgr.revision += 1
+        await mgr.broadcaster.emit("revert", {"reverted_files": result.data.get("reverted", [])})
+        return action_http(result)
 
 
 @app.post("/api/clear")
 async def clear_session() -> dict[str, Any]:
     mgr = get_manager()
-    if not mgr.session:
-        return {"status": "ok"}
-    mgr.session.history.clear()
-    mgr.session.display_history.clear()
-    mgr.session.workflow_turns.clear()
-    mgr.broadcaster.clear()
-    await mgr.broadcaster.emit("cleared", {})
-    return {"status": "ok"}
+    async with mgr._lock:
+        mgr.require_idle("clear")
+        if not mgr.session:
+            return {"status": "ok"}
+        result = SessionActions(mgr.session).clear_context()
+        mgr.revision += 1
+        await mgr.broadcaster.emit("cleared", {})
+        return action_http(result)
 
 
 @app.get("/api/sessions")
@@ -544,39 +581,46 @@ async def get_session_detail(session_id: str) -> dict[str, Any]:
 
 @app.post("/api/sessions/{session_id}/resume")
 async def resume_saved_session(session_id: str) -> dict[str, Any]:
-    from apodex.session_state import load_session_state
-
     mgr = get_manager()
-    if mgr.is_running:
-        raise HTTPException(status_code=400, detail="Cannot resume while agent is running.")
-    session_id = normalize_session_id(session_id) or session_id
-    state = load_session_state(session_id)
-    if not state:
-        raise HTTPException(status_code=404, detail="Session not found")
-
-    if state.get("cwd") and Path(state["cwd"]).is_dir():
-        mgr.cwd = str(Path(state["cwd"]).resolve())
-
-    if not mgr.session:
-        mgr._init_session(state.get("mode", "react"), session_id=session_id)
-    assert mgr.session is not None
-    mgr.session.cwd = mgr.cwd
-    mgr.session.switch_session(state, fallback_id=session_id)
-    mgr.mode = mgr.session.mode
-    await mgr.broadcaster.emit("session_resumed", {"session_id": session_id, "mode": mgr.mode, "cwd": mgr.cwd})
-    return {"status": "ok", "session_id": session_id, "mode": mgr.mode, "cwd": mgr.cwd}
+    async with mgr._lock:
+        mgr.require_idle("resume")
+        session_id = normalize_session_id(session_id) or session_id
+        if not mgr.session:
+            mgr._init_session(mgr.mode)
+        assert mgr.session is not None
+        result = SessionActions(mgr.session).resume_session(session_id)
+        payload = action_http(result)
+        mgr.cwd = mgr.session.cwd
+        mgr.mode = mgr.session.mode
+        mgr.revision += 1
+        await mgr.broadcaster.emit(
+            "session_resumed",
+            {"session_id": mgr.session.session_id, "mode": mgr.mode, "cwd": mgr.cwd},
+        )
+        payload.update({"mode": mgr.mode, "cwd": mgr.cwd})
+        return payload
 
 
 @app.post("/api/sessions/new")
 async def create_new_session(req: NewSessionRequest) -> dict[str, Any]:
     mgr = get_manager()
-    if mgr.is_running:
-        raise HTTPException(status_code=400, detail="Cannot create new session while a task is running.")
-    mode = req.mode if req.mode in terminal_mode_names() else "react"
-    mgr._init_session(mode)
-    mgr.broadcaster.clear()
-    await mgr.broadcaster.emit("session_created", {"session_id": mgr.session.session_id, "mode": mgr.mode})
-    return {"status": "ok", "session_id": mgr.session.session_id, "mode": mgr.mode}
+    async with mgr._lock:
+        mgr.require_idle("new")
+        mode = req.mode if req.mode in terminal_mode_names() else "react"
+        if not mgr.session:
+            mgr._init_session(mode)
+        assert mgr.session is not None
+        result = SessionActions(mgr.session).new_session(fork=False)
+        mgr.mode = mgr.session.mode
+        mgr.revision += 1
+        mgr.broadcaster.clear()
+        await mgr.broadcaster.emit(
+            "session_created",
+            {"session_id": mgr.session.session_id, "mode": mgr.mode},
+        )
+        payload = action_http(result)
+        payload["mode"] = mgr.mode
+        return payload
 
 
 @app.get("/api/workspaces")

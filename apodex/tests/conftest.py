@@ -17,3 +17,20 @@ def _isolated_user_dirs(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(home / ".cache"))
     monkeypatch.setenv("XDG_STATE_HOME", str(home / ".local" / "state"))
+
+
+@pytest.fixture
+def web_manager(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("FRONTIER_AGENT_CWD", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    import apodex.web_server as ws
+    ws.manager = ws.WebAgentManager(initial_mode="react", cwd=str(tmp_path))
+    return ws.manager
+
+
+@pytest.fixture
+def web_client(web_manager):
+    from fastapi.testclient import TestClient
+    import apodex.web_server as ws
+    return TestClient(ws.app)
