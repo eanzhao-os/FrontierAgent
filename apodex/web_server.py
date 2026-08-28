@@ -727,9 +727,16 @@ async def get_history() -> dict[str, Any]:
 async def get_diff() -> dict[str, Any]:
     mgr = get_manager()
     if not mgr.session or not mgr.session.journal:
-        return {"diff": "", "stats": {}}
-    stats = mgr.session.journal.revertable_diffstat()
-    return {"stats": stats}
+        return {"diff": "", "stats": [], "observed_only": [], "revertable": False}
+    journal = mgr.session.journal
+    stats = journal.revertable_diffstat()
+    observed = journal.observed_only()
+    return {
+        "diff": journal.unified_diff(),
+        "stats": [list(stat) for stat in stats],
+        "observed_only": observed,
+        "revertable": bool(stats),
+    }
 
 
 def normalize_session_id(sid: Optional[str]) -> Optional[str]:
@@ -783,7 +790,15 @@ async def list_artifacts(session_id: Optional[str] = None) -> dict[str, Any]:
     # Sort newest first
     artifacts.sort(key=lambda a: -a["modified_at"])
 
-    return {"artifacts": artifacts, "session_id": sid}
+    # Formal deliverable locations, mirroring the TUI title bar (paths only, no secrets)
+    locations = {
+        "host_outputs": os.environ.get("APODEX_HOST_OUTPUTS_DIR", "").strip(),
+        "agent_outputs": (os.environ.get("FRONTIER_AGENT_OUTPUTS_DIR", "").strip()
+                          or str(Path(mgr.cwd) / ".apodex" / "outputs")),
+        "work": os.environ.get("APODEX_HOST_WORKSPACE_DIR", "").strip(),
+    }
+
+    return {"artifacts": artifacts, "session_id": sid, "locations": locations}
 
 
 def _allowed_web_file(path: str) -> Path:

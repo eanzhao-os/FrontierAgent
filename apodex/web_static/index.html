@@ -1642,7 +1642,9 @@
       // Workspace & history data
       const [workspaces, setWorkspaces] = useState([]);
       const [activeCwd, setActiveCwd] = useState("");
-      const [diffStats, setDiffStats] = useState({});
+      const [diffData, setDiffData] = useState(null);
+      const [revertReport, setRevertReport] = useState(null);
+      const [fileLocations, setFileLocations] = useState(null);
       const [artifacts, setArtifacts] = useState([]);
       const [savedSessions, setSavedSessions] = useState([]);
       const [inspectSession, setInspectSession] = useState(null);
@@ -1768,14 +1770,21 @@
       }, []);
 
       const refreshWorkspace = useCallback(async () => {
+        let diff = null;
         const [diffRes, artRes, sessRes, wsRes] = await Promise.all([
           safeFetch("/api/diff"),
           safeFetch("/api/artifacts"),
           safeFetch("/api/sessions"),
           safeFetch("/api/workspaces"),
         ]);
-        if (diffRes && diffRes.ok) { try { const d = await diffRes.json(); setDiffStats(d.stats || {}); } catch {} }
-        if (artRes && artRes.ok) { try { const a = await artRes.json(); setArtifacts(a.artifacts || []); } catch {} }
+        if (diffRes && diffRes.ok) { try { diff = await diffRes.json(); setDiffData(diff); } catch {} }
+        if (artRes && artRes.ok) {
+          try {
+            const a = await artRes.json();
+            setArtifacts(a.artifacts || []);
+            if (a.locations) setFileLocations(a.locations);
+          } catch {}
+        }
         if (sessRes && sessRes.ok) { try { const s = await sessRes.json(); setSavedSessions(s.sessions || []); } catch {} }
         if (wsRes && wsRes.ok) {
           try {
@@ -1788,6 +1797,7 @@
         if (attRes && attRes.ok) {
           try { const a = await attRes.json(); setAttachedFiles(a.attachments || []); } catch {}
         }
+        return diff;
       }, []);
 
       const handleOpenPreview = async (filePath) => {
@@ -2282,7 +2292,10 @@
               setThinkingStartedAt(null);
               setIsBusy(false);
               refreshStatus();
-              refreshWorkspace();
+              const freshDiff = await refreshWorkspace();
+              // Task finished: surface what changed — Diff when there are edits, Files otherwise
+              if (freshDiff && ((freshDiff.stats || []).length || (freshDiff.diff || "").length)) setRightTab("diff");
+              else setRightTab("files");
               scrollToBottom();
             } catch {}
           });
@@ -2427,17 +2440,30 @@
       };
 
       const handleRevert = async () => {
+        if (isBusy) return;
         if (!revertArmed) {
           setRevertArmed(true);
           setTimeout(() => setRevertArmed(false), 3000);
           return;
         }
         setRevertArmed(false);
-        await safeFetch("/api/revert", { method: "POST" });
+        const res = await safeFetch("/api/revert", { method: "POST" });
+        if (res && res.ok) {
+          try {
+            const body = await res.json();
+            setRevertReport({ reverted: body.reverted || [], observed_only: body.observed_only || [], at: Date.now() });
+          } catch {}
+        }
         refreshWorkspace();
       };
 
       /* ── Derived data ── */
+      const diffRows = useMemo(
+        () => (Array.isArray(diffData?.stats) ? diffData.stats : []).map(([file, added, deleted]) => ({ file, added, deleted })),
+        [diffData]
+      );
+      const diffObserved = diffData?.observed_only || [];
+      const diffText = diffData?.diff || "";
       const boardCounts = useMemo(() => {
         const c = { total: board.length, resolved: 0, in_progress: 0, open: 0, cancelled: 0, active: 0 };
         for (const r of board) {
@@ -3217,7 +3243,7 @@
                       { key: "plan", label: isZh ? "计划" : "Plan", icon: Icons.board, badge: (planItems.length || boardCounts.total) ? `${planItems.filter((i) => i.status === "completed" || i.status === "resolved").length || boardCounts.resolved}/${planItems.length || boardCounts.total}` : null },
                       { key: "activity", label: isZh ? "活动" : "Activity", icon: Icons.terminal, badge: (activityRecords.length || subagents.length) ? String(activityRecords.length || subagents.length) : null },
                       { key: "files", label: isZh ? "文件" : "Files", icon: Icons.boxes, badge: artifacts.length > 0 ? String(artifacts.length) : null },
-                      { key: "diff", label: "Diff", icon: Icons.board, badge: null, hide: !(diffStats && Object.keys(diffStats).length) },
+                      { key: "diff", label: "Diff", icon: Icons.board, badge: diffRows.length ? String(diffRows.length) : null, hide: !(diffRows.length || diffText || diffObserved.length) },
                     ].filter((t) => !t.hide).map((t) => (
                       <button
                         key={t.key}
@@ -3330,21 +3356,22 @@
                           </button>
                         </div>
 
-                        {/* Transparent deliverables: the host run dir */}
-                        {status?.session_id && (
-                          <div className="rounded-lg px-2.5 py-2" style={{ backgroundColor: "var(--inset)", boxShadow: "var(--shadow-hairline)" }}>
-                            <div className="text-[10px] font-semibold uppercase tracking-wider" style={{ color: "var(--ink-3)" }}>
-                              {isZh ? "宿主机运行目录" : "Host run directory"}
+                        {/* Formal deliverable locations — Host / Agent / Work, mirroring the TUI title bar */}
+                        <div className="rounded-lg px-2.5 py-2" style={{ backgroundColor: "var(--inset)", boxShadow: "var(--shadow-hairline)" }}>
+                          {[
+                            fileLocations?.host_outputs ? { label: "Host", value: fileLocations.host_outputs } : null,
+                            { label: "Agent", value: fileLocations?.agent_outputs || "" },
+                            fileLocations?.work ? { label: "Work", value: `${fileLocations.work}${isZh ? "（过程文件）" : " (intermediate)"}` } : null,
+                            status?.session_id ? { label: "Run", value: `.apodex/runs/${status.session_id}/` } : null,
+                          ].filter(Boolean).map((loc) => (
+                            <div key={loc.label} className="mono mt-0.5 break-all text-[10.5px] leading-snug" style={{ color: "var(--ink-2)" }}>
+                              <span className="font-semibold" style={{ color: "var(--ink-3)" }}>{loc.label}: </span>{loc.value}
                             </div>
-                            <div className="mono mt-0.5 break-all text-[10.5px] leading-snug" style={{ color: "var(--ink-2)" }}>
-                              .apodex/runs/{status.session_id}/
-                            </div>
-                          </div>
-                        )}
+                          ))}
+                        </div>
 
                         {[
                           { category: "outputs", title: isZh ? "交付产物 · /outputs" : "Deliverables · /outputs", hint: isZh ? "持久化交付物" : "persistent deliverables" },
-                          { category: "workspace", title: isZh ? "工作区 · /workspace" : "Working state · /workspace", hint: isZh ? "过程文件" : "intermediate state" },
                         ].map((group) => {
                           const files = artifacts.filter((a) => a.category === group.category);
                           return (
@@ -3482,123 +3509,87 @@
                       </div>
                     )}
 
-                    {/* ── Status: runtime, tokenomics, changes ── */}
-                    {rightTab === "status" && (
-                      <div className="space-y-3 text-[12px]">
-                        <div className="rounded-[10px] p-3.5" style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-card)" }}>
-                          <h4 className="mb-2 text-[11.5px] font-semibold uppercase tracking-wider" style={{ color: "var(--ink-3)" }}>
-                            {isZh ? "运行时" : "Runtime"}
+                    {/* ── Diff: journaled changes with attributed revert ── */}
+                    {rightTab === "diff" && (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-[11.5px] font-semibold uppercase tracking-wider" style={{ color: "var(--ink-3)" }}>
+                            {isZh ? "文件变更" : "Changes"}
                           </h4>
-                          <div className="space-y-1.5">
-                            <div className="flex items-center justify-between gap-2">
-                              <span style={{ color: "var(--ink-2)" }}>{isZh ? "会话" : "Session"}</span>
-                              <span className="mono truncate text-[10.5px]" style={{ color: "var(--ink)" }}>{status?.session_id || "—"}</span>
-                            </div>
-                            <div className="flex items-center justify-between gap-2">
-                              <span style={{ color: "var(--ink-2)" }}>{isZh ? "模式" : "Mode"}</span>
-                              <span className="mono text-[10.5px] font-semibold uppercase" style={{ color: modeInk }}>{activeMode}</span>
-                            </div>
-                            <div className="flex items-center justify-between gap-2">
-                              <span style={{ color: "var(--ink-2)" }}>{isZh ? "模型" : "Model"}</span>
-                              <span className="mono truncate text-[10.5px]" style={{ color: "var(--ink)" }}>{status?.model || "—"}</span>
-                            </div>
-                            <div className="flex items-center justify-between gap-2">
-                              <span style={{ color: "var(--ink-2)" }}>{isZh ? "轮次" : "Turns"}</span>
-                              <span className="mono text-[10.5px] tabular-nums" style={{ color: "var(--ink)" }}>{status?.usage?.turns ?? "—"}</span>
-                            </div>
-                            <div className="flex items-center justify-between gap-2">
-                              <span style={{ color: "var(--ink-2)" }}>{isZh ? "工作区" : "Workspace"}</span>
-                              <button
-                                type="button"
-                                onClick={() => setIsWorkspaceModalOpen(true)}
-                                className="mono flex min-w-0 cursor-pointer items-center gap-1 truncate text-[10.5px] transition-colors duration-100 hover:underline"
-                                style={{ color: "var(--accent-ink)", background: "none", border: "none" }}
-                                title={activeCwd}
-                              >
-                                <Icons.folder />
-                                <span className="truncate">{activeWorkspaceName}</span>
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="rounded-[10px] p-3.5" style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-card)" }}>
-                          <h4 className="mb-2 text-[11.5px] font-semibold uppercase tracking-wider" style={{ color: "var(--ink-3)" }}>
-                            Tokenomics
-                          </h4>
-                          <div className="space-y-1.5">
-                            <div className="flex items-center justify-between">
-                              <span style={{ color: "var(--ink-2)" }}>Prompt</span>
-                              <span className="mono text-[10.5px] tabular-nums" style={{ color: "var(--ink)" }}>{Number(usage.prompt_tokens || 0).toLocaleString()}</span>
-                            </div>
-                            <div className="flex items-center justify-between">
-                              <span style={{ color: "var(--ink-2)" }}>Completion</span>
-                              <span className="mono text-[10.5px] tabular-nums" style={{ color: "var(--ink)" }}>{Number(usage.completion_tokens || 0).toLocaleString()}</span>
-                            </div>
-                            <div className="flex items-center justify-between border-t pt-1.5" style={{ borderColor: "var(--line)" }}>
-                              <span className="font-medium" style={{ color: "var(--ink)" }}>Total</span>
-                              <span className="mono text-[10.5px] font-semibold tabular-nums" style={{ color: "var(--accent-ink)" }}>{totalTokens.toLocaleString()}</span>
-                            </div>
-                          </div>
-                          {contextWindow > 0 && (
-                            <div className="mt-2.5">
-                              <div className="mb-1 flex items-center justify-between text-[10.5px]" style={{ color: "var(--ink-3)" }}>
-                                <span>{isZh ? "上下文窗口" : "Context window"}</span>
-                                <span className="mono tabular-nums">{Math.min(100, Math.round((totalTokens / contextWindow) * 100))}% · {contextWindow.toLocaleString()}</span>
-                              </div>
-                              <div className="h-1 overflow-hidden rounded-full" style={{ backgroundColor: "var(--field)" }}>
-                                <div
-                                  className="h-full rounded-full transition-all duration-500"
-                                  style={{
-                                    width: `${Math.min(100, (totalTokens / contextWindow) * 100)}%`,
-                                    backgroundColor: totalTokens / contextWindow > 0.85 ? "var(--orange)" : "var(--accent)",
-                                  }}
-                                />
-                              </div>
-                            </div>
+                          {(diffRows.length > 0 || diffObserved.length > 0) && (
+                            <button
+                              type="button"
+                              onClick={handleRevert}
+                              disabled={isBusy}
+                              className="cursor-pointer rounded-md px-2 py-0.5 text-[10.5px] font-medium transition-colors duration-100"
+                              style={{
+                                backgroundColor: revertArmed ? "var(--red)" : "var(--red-tint)",
+                                color: revertArmed ? "#fff" : "var(--red)",
+                                border: "none",
+                                opacity: isBusy ? 0.5 : 1,
+                              }}
+                              title="/revert"
+                            >
+                              {revertArmed ? (isZh ? "确认撤销？" : "Confirm?") : (isZh ? "全部撤销" : "Revert all")}
+                            </button>
                           )}
                         </div>
 
-                        <div className="rounded-[10px] p-3.5" style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-card)" }}>
-                          <div className="mb-2 flex items-center justify-between">
-                            <h4 className="text-[11.5px] font-semibold uppercase tracking-wider" style={{ color: "var(--ink-3)" }}>
-                              {isZh ? "文件变更" : "Changes"}
-                            </h4>
-                            {Object.keys(diffStats).length > 0 && (
-                              <button
-                                type="button"
-                                onClick={handleRevert}
-                                className="cursor-pointer rounded-md px-2 py-0.5 text-[10.5px] font-medium transition-colors duration-100"
-                                style={{
-                                  backgroundColor: revertArmed ? "var(--red)" : "var(--red-tint)",
-                                  color: revertArmed ? "#fff" : "var(--red)",
-                                  border: "none",
-                                }}
-                                title="/revert"
-                              >
-                                {revertArmed ? (isZh ? "确认撤销？" : "Confirm?") : (isZh ? "全部撤销" : "Revert all")}
-                              </button>
+                        {revertReport && (
+                          <div className="rounded-[10px] p-3 text-[11.5px]" style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-card)" }}>
+                            <div className="mb-1 font-semibold" style={{ color: "var(--ink)" }}>
+                              {isZh ? "撤销结果" : "Revert result"}
+                            </div>
+                            {revertReport.reverted.length > 0 ? (
+                              <div className="mono break-all" style={{ color: "var(--green)" }}>
+                                {isZh ? "已恢复：" : "reverted: "}{revertReport.reverted.join(", ")}
+                              </div>
+                            ) : (
+                              <div style={{ color: "var(--ink-3)" }}>
+                                {isZh ? "没有可撤销的归因编辑" : "No attributed edits to revert"}
+                              </div>
+                            )}
+                            {revertReport.observed_only.length > 0 && (
+                              <div className="mono mt-1 break-all" style={{ color: "var(--orange)" }}>
+                                {isZh ? "未动（扫描发现，需手动撤销）：" : "left alone (found by scanning — undo yourself): "}{revertReport.observed_only.join(", ")}
+                              </div>
                             )}
                           </div>
-                          {Object.keys(diffStats).length === 0 ? (
-                            <div className="text-[11.5px]" style={{ color: "var(--ink-3)" }}>
-                              {isZh ? "当前无可撤销的文件修改" : "No revertible file changes"}
-                            </div>
-                          ) : (
-                            <div className="space-y-1">
-                              {Object.entries(diffStats).map(([f, stat]) => (
-                                <div key={f} className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5"
-                                     style={{ backgroundColor: "var(--inset)", boxShadow: "var(--shadow-hairline)" }}>
-                                  <span className="mono min-w-0 truncate text-[11px]" style={{ color: "var(--ink)" }} title={f}>{f}</span>
-                                  <div className="mono flex shrink-0 items-center gap-1.5 text-[10.5px] tabular-nums">
-                                    {stat.added > 0 && <span style={{ color: "var(--green)" }}>+{stat.added}</span>}
-                                    {stat.deleted > 0 && <span style={{ color: "var(--red)" }}>-{stat.deleted}</span>}
-                                  </div>
+                        )}
+
+                        {diffRows.length === 0 && diffObserved.length === 0 ? (
+                          <div className="text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+                            {isZh ? "当前无可撤销的文件修改" : "No revertible file changes"}
+                          </div>
+                        ) : (
+                          <div className="space-y-1">
+                            {diffRows.map((row) => (
+                              <div key={row.file} className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5"
+                                   style={{ backgroundColor: "var(--inset)", boxShadow: "var(--shadow-hairline)" }}>
+                                <span className="mono min-w-0 truncate text-[11px]" style={{ color: "var(--ink)" }} title={row.file}>{row.file}</span>
+                                <div className="mono flex shrink-0 items-center gap-1.5 text-[10.5px] tabular-nums">
+                                  {row.added > 0 && <span style={{ color: "var(--green)" }}>+{row.added}</span>}
+                                  {row.deleted > 0 && <span style={{ color: "var(--red)" }}>-{row.deleted}</span>}
                                 </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
+                              </div>
+                            ))}
+                            {diffObserved.map((f) => (
+                              <div key={f} className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5"
+                                   style={{ backgroundColor: "var(--inset)", boxShadow: "var(--shadow-hairline)" }}>
+                                <span className="mono min-w-0 truncate text-[11px]" style={{ color: "var(--ink-3)" }} title={f}>{f}</span>
+                                <span className="shrink-0 text-[9.5px] uppercase tracking-wide" style={{ color: "var(--orange)" }}>
+                                  {isZh ? "仅观察" : "observed only"}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {diffText && (
+                          <div className="max-h-[420px] overflow-y-auto rounded-[10px]">
+                            <DiffBlock text={diffText} />
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

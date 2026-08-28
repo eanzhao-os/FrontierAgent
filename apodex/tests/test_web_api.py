@@ -314,3 +314,32 @@ def test_search_lists_attachments_before_workspace(web_client, web_manager, tmp_
     web_client.post("/api/attachments/path", json={"paths": [str(tmp_path / "readme.md")]})
     hits = web_client.get("/api/files/search", params={"q": "read"}).json()["candidates"]
     assert hits[0]["source"] == "attachment"
+
+
+def test_diff_endpoint_includes_observed_only(web_client, web_manager, tmp_path):
+    target = tmp_path / "built.js"
+    target.write_text("before\n")
+    before = web_manager.session.journal.begin_tree_scan([str(tmp_path)])
+    target.write_text("after\n")
+    web_manager.session.journal.finish_tree_scan([str(tmp_path)], before)
+    data = web_client.get("/api/diff").json()
+    assert "built.js" in data["observed_only"]
+    assert "diff" in data
+    assert data["revertable"] is True or data["revertable"] is False
+
+
+def test_diff_endpoint_reports_attributed_change(web_client, web_manager, tmp_path):
+    target = tmp_path / "edited.txt"
+    target.write_text("old\n")
+    web_manager.session.journal.record_before(str(target))
+    target.write_text("new\n")
+    data = web_client.get("/api/diff").json()
+    assert any(stat[0].endswith("edited.txt") for stat in data["stats"])
+    assert "edited.txt" in data["diff"]
+    assert data["revertable"] is True
+
+
+def test_artifacts_include_deliverable_locations(web_client):
+    data = web_client.get("/api/artifacts").json()
+    assert set(data["locations"]) >= {"host_outputs", "agent_outputs", "work"}
+    assert data["locations"]["agent_outputs"]  # always resolvable
