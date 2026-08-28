@@ -53,3 +53,11 @@ def test_capabilities_payload_includes_aliases_and_shortcuts():
 def test_capabilities_http_matches_registry(web_client):
     names = {item["name"] for item in web_client.get("/api/capabilities").json()["commands"]}
     assert names == {spec.name for spec in COMMANDS}
+
+
+def test_tui_palette_matches_registry():
+    from apodex.commands import COMMANDS, command_palette_rows
+    from apodex.tui.app import _COMMANDS
+
+    assert tuple(command_palette_rows()) == _COMMANDS
+    assert {spec.name for spec in COMMANDS} == {name for name, _ in _COMMANDS}
