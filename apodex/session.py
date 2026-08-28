@@ -189,6 +189,8 @@ class TerminalSession(TaskRunnerMixin):
         # plugins.tools._path_auth._authorized_local_path). Without this they
         # only allow a few default dirs and deny the user's repo.
         self._authorize_workspace(cwd)
+        from apodex.session_actions import SessionActions
+        self.actions = SessionActions(self)
 
     @staticmethod
     def _active_spill_workspace() -> Path | None:
