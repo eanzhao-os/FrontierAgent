@@ -298,6 +298,21 @@ class SessionActions:
             {"auto_for_me": enabled},
         )
 
+    def set_theme(self, name: str) -> ActionResult:
+        from apodex.tui.themes import CLI_THEME_NAMES
+
+        cleaned = (name or "").strip()
+        if cleaned not in CLI_THEME_NAMES:
+            return ActionResult(
+                False,
+                "validation",
+                "unknown theme: " + cleaned,
+                {"themes": list(CLI_THEME_NAMES)},
+            )
+        self.session.user_settings.theme = cleaned
+        self.session.user_settings.save()
+        return ActionResult(True, "ok", f"theme → {cleaned}", {"theme": cleaned})
+
     def attach_paths(self, argument: str) -> ActionResult:
         from apodex.attachments import AttachmentError
 

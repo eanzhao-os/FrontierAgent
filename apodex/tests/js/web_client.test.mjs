@@ -102,3 +102,17 @@ describe("plan and activity", () => {
 });
 
 
+
+describe("theme presets", () => {
+  it("applies a named preset's variables and dark flag", () => {
+    const { applyThemePreset } = loadPureClient();
+    const presets = {
+      mono: { dark: true, vars: { "--page": "#000000", "--ink": "#ffffff" } },
+      light: { dark: false, vars: {} },
+    };
+    const out = applyThemePreset("mono", presets);
+    assert.equal(out.dark, true);
+    assert.equal(out.vars["--ink"], "#ffffff");
+    assert.equal(applyThemePreset("nope", presets), null);
+  });
+});

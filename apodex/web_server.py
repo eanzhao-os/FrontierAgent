@@ -102,6 +102,7 @@ _DISPATCHABLE_ACTIONS = frozenset({
     "switch_workflow",
     "switch_model",
     "change_cwd",
+    "set_theme",
 })
 
 
@@ -352,6 +353,125 @@ async def get_config() -> dict[str, Any]:
     return _runtime_config_payload(mgr.session)
 
 
+@app.get("/api/onboarding")
+async def get_onboarding() -> dict[str, Any]:
+    """Secret-free environment probe shown when runtime config is not usable.
+
+    Key variables are reported by name only; values never enter the payload.
+    """
+    from apodex.onboarding import detect_onboarding_environment
+
+    mgr = get_manager()
+    if not mgr.session:
+        mgr._init_session(mgr.mode)
+    assert mgr.session is not None
+    status = mgr.session.runtime_config_status()
+    probe = detect_onboarding_environment(cwd=mgr.cwd, runtime_status=status)
+    return {
+        "probe": {
+            "env_path": probe.env_path,
+            "configured_key_vars": list(probe.configured_key_vars),
+            "active_config_ok": probe.active_config_ok,
+            "active_config_summary": probe.active_config_summary,
+            "nvidia_smi": probe.nvidia_smi,
+            "gpu_summary": probe.gpu_summary,
+            "docker": probe.docker,
+            "docker_daemon": probe.docker_daemon,
+            "docker_compose": probe.docker_compose,
+            "nvidia_runtime": probe.nvidia_runtime,
+            "nvidia_container_ready": probe.nvidia_container_ready,
+            "missing_nvidia_components": list(probe.missing_nvidia_components),
+            "managed_local_service": probe.managed_local_service,
+            "suggested_choice": probe.suggested_choice,
+        },
+        "config": {
+            "ok": bool(status.ok),
+            "provider": status.provider,
+            "model": status.model,
+            "endpoint_host": status.endpoint_host,
+            "api_key_env": status.api_key_env,
+            "api_key_configured": status.api_key_configured,
+            "issues": [
+                {
+                    "code": issue.code,
+                    "message": issue.message,
+                    "env_var": issue.env_var,
+                    "blocking": issue.blocking,
+                }
+                for issue in status.issues
+            ],
+        },
+    }
+
+
+@app.get("/api/themes")
+async def get_themes() -> dict[str, Any]:
+    """TUI palettes projected onto the Web CSS variable presets.
+
+    The native-ai-ui light/dark stylesheet stays the baseline; a named preset
+    overrides variables inline. ``mono`` has no TUI palette (line-mode only),
+    so its high-contrast monochrome preset is defined here.
+    """
+    from apodex.tui.themes import THEME_PICKER_NAMES, THEME_SPECS, blend
+
+    themes: dict[str, Any] = {
+        "mono": {
+            "dark": True,
+            "vars": {
+                "--page": "#000000",
+                "--canvas": "#0a0a0a",
+                "--surface": "#111111",
+                "--inset": "#0a0a0a",
+                "--hover": "#1c1c1c",
+                "--hover-2": "#262626",
+                "--ink": "#ffffff",
+                "--ink-2": "#c8c8c8",
+                "--ink-3": "#9c9c9c",
+                "--line": "#2f2f2f",
+                "--line-strong": "#474747",
+                "--field": "#171717",
+                "--accent": "#ffffff",
+                "--accent-ink": "#e6e6e6",
+                "--accent-tint": "#ffffff1f",
+                "--green": "#e6e6e6",
+                "--green-tint": "#ffffff17",
+                "--orange": "#d9d9d9",
+                "--orange-tint": "#ffffff14",
+                "--red": "#ffffff",
+                "--red-tint": "#ffffff1c",
+            },
+        },
+    }
+    for spec in THEME_SPECS:
+        themes[spec.name] = {
+            "dark": spec.dark,
+            "vars": {
+                "--page": spec.background,
+                "--canvas": spec.panel,
+                "--surface": spec.surface,
+                "--inset": blend(spec.background, spec.surface, 0.5),
+                "--hover": blend(spec.surface, spec.foreground, 0.07),
+                "--hover-2": blend(spec.surface, spec.foreground, 0.14),
+                "--ink": spec.foreground,
+                "--ink-2": spec.muted,
+                "--ink-3": spec.subtle,
+                "--line": blend(spec.surface, spec.foreground, 0.14),
+                "--line-strong": blend(spec.surface, spec.foreground, 0.28),
+                "--field": blend(spec.background, spec.foreground, 0.08),
+                "--accent": spec.primary,
+                "--accent-ink": spec.secondary,
+                "--accent-tint": spec.primary + "24",
+                "--green": spec.success,
+                "--green-tint": spec.success + "22",
+                "--orange": spec.warning,
+                "--orange-tint": spec.warning + "22",
+                "--red": spec.error,
+                "--red-tint": spec.error + "22",
+            },
+        }
+    return {"themes": themes, "picker": [*THEME_PICKER_NAMES, "mono"]}
+
+
 @app.get("/api/context")
 async def get_context() -> dict[str, Any]:
     mgr = get_manager()
@@ -539,6 +659,8 @@ async def post_action(req: ActionRequest) -> dict[str, Any]:
             result = actions.switch_workflow(str(args.get("mode") or args.get("name") or ""))
         elif req.action == "switch_model":
             result = actions.switch_model(str(args.get("model") or args.get("target") or ""))
+        elif req.action == "set_theme":
+            result = actions.set_theme(str(args.get("name") or args.get("theme") or ""))
         else:
             result = actions.change_cwd(str(args.get("path") or args.get("cwd") or ""))
         payload = action_http(result)

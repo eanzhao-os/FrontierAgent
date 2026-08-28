@@ -343,3 +343,31 @@ def test_artifacts_include_deliverable_locations(web_client):
     data = web_client.get("/api/artifacts").json()
     assert set(data["locations"]) >= {"host_outputs", "agent_outputs", "work"}
     assert data["locations"]["agent_outputs"]  # always resolvable
+
+
+def test_onboarding_payload_is_secret_free(web_client, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-live-secret")
+    res = web_client.get("/api/onboarding")
+    assert res.status_code == 200
+    data = res.json()
+    blob = str(data)
+    assert "sk-live-secret" not in blob
+    assert "probe" in data
+    assert data["probe"]["configured_key_vars"] == ["OPENAI_API_KEY"]
+
+
+def test_theme_action_persists_user_setting(web_client, web_manager):
+    res = web_client.post("/api/actions", json={"action": "set_theme", "arguments": {"name": "mono"}})
+    assert res.status_code == 200
+    assert web_manager.session.user_settings.theme == "mono"
+    bad = web_client.post("/api/actions", json={"action": "set_theme", "arguments": {"name": "neon"}})
+    assert bad.status_code == 400
+
+
+def test_themes_payload_covers_picker_names_plus_light_dark_mono(web_client):
+    data = web_client.get("/api/themes").json()
+    names = set(data["themes"])
+    assert {"light", "dark", "mono"} <= names
+    assert "catppuccin" in names
+    assert "--page" in data["themes"]["catppuccin"]["vars"]
+    assert data["themes"]["mono"]["dark"] is True

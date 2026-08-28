@@ -1041,7 +1041,7 @@
       );
     }
 
-    function SettingsModal({ isOpen, onClose, isZh, isDark, toggleTheme, toggleLang, onAction, isBusy }) {
+    function SettingsModal({ isOpen, onClose, isZh, isDark, toggleTheme, toggleLang, onAction, isBusy, themeName, themeOptions, onSelectTheme }) {
       const [tab, setTab] = useState("appearance");
       const [config, setConfig] = useState(null);
       const [context, setContext] = useState("");
@@ -1140,6 +1140,19 @@
                     <button type="button" onClick={toggleTheme} className="cursor-pointer rounded-lg px-3 py-1.5 text-[12px]" style={{ backgroundColor: "var(--field)", border: "none", color: "var(--ink)" }}>
                       {isDark ? (isZh ? "暗色" : "Dark") : (isZh ? "亮色" : "Light")}
                     </button>
+                  </div>
+                  <div className="flex items-center justify-between gap-3">
+                    <span style={{ color: "var(--ink)" }}>{isZh ? "配色预设" : "Palette preset"}</span>
+                    <select
+                      aria-label={isZh ? "配色预设" : "Palette preset"}
+                      value={themeName || ""}
+                      onChange={(e) => onSelectTheme(e.target.value)}
+                      className="cursor-pointer rounded-lg px-3 py-1.5 text-[12px]"
+                      style={{ backgroundColor: "var(--field)", color: "var(--ink)", border: "none" }}
+                    >
+                      <option value="">{isZh ? "跟随 明/暗" : "Auto light/dark"}</option>
+                      {(themeOptions || []).map((t) => <option key={t} value={t}>{t}</option>)}
+                    </select>
                   </div>
                   <div className="flex items-center justify-between">
                     <span style={{ color: "var(--ink)" }}>{isZh ? "语言" : "Language"}</span>
@@ -1578,7 +1591,74 @@
       }
       return "";
     }
+
+    function applyThemePreset(name, presets) {
+      const preset = presets && presets[name];
+      if (!preset || !preset.vars) return null;
+      return { name: name, dark: !!preset.dark, vars: Object.assign({}, preset.vars) };
+    }
+
+    function onboardingHeadline(data, isZh) {
+      const issues = (data && data.config && data.config.issues) || [];
+      const blocking = issues.filter((i) => i.blocking);
+      if (blocking.length === 0 && data && data.config && data.config.ok) {
+        return isZh ? "配置就绪" : "Configuration ready";
+      }
+      return isZh ? "需要先完成配置" : "Configuration needed before first run";
+    }
     /* FA_PURE_END */
+
+    function OnboardingPanel({ data, isZh, onDismiss, onRecheck }) {
+      const probe = (data && data.probe) || {};
+      const cfg = (data && data.config) || {};
+      const blocking = (cfg.issues || []).filter((issue) => issue.blocking);
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+          <div className="anim-pop-in max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-[10px] p-5"
+               style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-overlay)" }}>
+            <h3 className="text-[13.5px] font-semibold" style={{ color: "var(--ink)" }}>{onboardingHeadline(data, isZh)}</h3>
+            <p className="mt-1 text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+              {isZh ? "以下探测信息只含变量名与主机名，绝不含密钥值。" : "Probe facts below carry variable names and hosts only — never key values."}
+            </p>
+
+            <div className="mono mt-3 space-y-1 rounded-lg p-3 text-[11px]" style={{ backgroundColor: "var(--inset)", color: "var(--ink-2)" }}>
+              <div>{isZh ? "提供商" : "provider"}: {cfg.provider || "—"}</div>
+              <div>{isZh ? "模型" : "model"}: {cfg.model || "—"}</div>
+              <div>{isZh ? "端点" : "endpoint"}: {cfg.endpoint_host || "default"}</div>
+              <div>
+                {isZh ? "密钥" : "API key"}: {cfg.api_key_env ? `${cfg.api_key_env} ${cfg.api_key_configured ? "✓" : "✗"}` : (isZh ? "未配置" : "not set")}
+              </div>
+              {(probe.configured_key_vars || []).length > 0 && (
+                <div>{isZh ? "已配置密钥变量" : "configured key vars"}: {(probe.configured_key_vars || []).join(", ")}</div>
+              )}
+              {probe.env_path && <div>{isZh ? "环境文件" : "env file"}: {probe.env_path}</div>}
+            </div>
+
+            {blocking.length > 0 && (
+              <div className="mt-3 space-y-1.5">
+                <div className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: "var(--ink-3)" }}>
+                  {isZh ? "待解决" : "Blocking issues"}
+                </div>
+                {blocking.map((issue) => (
+                  <div key={issue.code} className="rounded-lg px-3 py-2 text-[11.5px]" style={{ backgroundColor: "var(--red-tint)", color: "var(--red)" }}>
+                    {issue.message}{issue.env_var ? ` (${issue.env_var})` : ""}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="mt-4 flex justify-between gap-2">
+              <button type="button" onClick={onRecheck} className="cursor-pointer rounded-lg px-3 py-1.5 text-[12px]" style={{ backgroundColor: "var(--field)", border: "none", color: "var(--ink)" }}>
+                {isZh ? "重新检测" : "Re-check"}
+              </button>
+              <button type="button" onClick={onDismiss} className="cursor-pointer rounded-lg px-3 py-1.5 text-[12px] font-medium" style={{ backgroundColor: "var(--accent)", border: "none", color: "#fff" }}>
+                {isZh ? "仍然进入" : "Continue anyway"}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
 
     function App() {
       const [isDark, setIsDark] = useState(() => {
@@ -1601,6 +1681,16 @@
       const [connected, setConnected] = useState(false);
       const [activeMode, setActiveMode] = useState("react");
       const [isBusy, setIsBusy] = useState(false);
+
+      // Theme presets + onboarding (config not ok → guidance overlay)
+      const [themeName, setThemeName] = useState(() => {
+        if (typeof window !== "undefined") return localStorage.getItem("fa_theme_name") || "";
+        return "";
+      });
+      const [themePresets, setThemePresets] = useState(null);
+      const [themeOptions, setThemeOptions] = useState([]);
+      const appliedThemeVarsRef = useRef([]);
+      const [onboarding, setOnboarding] = useState(null);
 
       // Layout & modals
       const [showLeftSidebar, setShowLeftSidebar] = useState(true);
@@ -1691,6 +1781,24 @@
         document.documentElement.classList.toggle("dark", isDark);
       }, [isDark]);
 
+      // A named preset overrides the native light/dark stylesheet inline;
+      // an empty name clears the overrides and returns to isDark.
+      useEffect(() => {
+        const root = document.documentElement;
+        for (const key of appliedThemeVarsRef.current) root.style.removeProperty(key);
+        appliedThemeVarsRef.current = [];
+        const applied = themeName && themePresets ? applyThemePreset(themeName, themePresets) : null;
+        if (applied) {
+          root.classList.toggle("dark", applied.dark);
+          for (const [key, value] of Object.entries(applied.vars)) {
+            root.style.setProperty(key, value);
+            appliedThemeVarsRef.current.push(key);
+          }
+        } else {
+          root.classList.toggle("dark", isDark);
+        }
+      }, [themeName, themePresets, isDark]);
+
       useEffect(() => {
         if (typeof window === "undefined" || !window.matchMedia) return;
         const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -1712,6 +1820,40 @@
           }
         });
       }, []);
+
+      // Theme presets (server is the source of truth for TUI palettes)
+      useEffect(() => {
+        safeFetch("/api/themes").then(async (res) => {
+          if (res && res.ok) {
+            try {
+              const data = await res.json();
+              setThemePresets(data.themes || null);
+              setThemeOptions(data.picker || Object.keys(data.themes || {}));
+            } catch {}
+          }
+        });
+      }, []);
+
+      // Runtime config: adopt the server-persisted theme, and swap in the
+      // onboarding guidance overlay when the config is not usable yet.
+      useEffect(() => {
+        (async () => {
+          const res = await safeFetch("/api/config");
+          if (!res || !res.ok) return;
+          try {
+            const cfg = await res.json();
+            if (cfg.theme && themePresets && cfg.theme in themePresets
+                && !localStorage.getItem("fa_theme_name")) {
+              setThemeName(cfg.theme);
+              localStorage.setItem("fa_theme_name", cfg.theme);
+            }
+            if (cfg.ok === false) {
+              const ob = await safeFetch("/api/onboarding");
+              if (ob && ob.ok) setOnboarding(await ob.json());
+            }
+          } catch {}
+        })();
+      }, [themePresets]);
 
       useEffect(() => {
         const onKey = (e) => {
@@ -1739,9 +1881,22 @@
       };
 
       const toggleTheme = () => {
+        if (themeName) {
+          // A preset is active — the toggle returns to native light/dark
+          selectTheme("");
+          return;
+        }
         const next = !isDark;
         setIsDark(next);
         if (typeof window !== "undefined") localStorage.setItem("fa_theme", next ? "dark" : "light");
+      };
+      const selectTheme = (name) => {
+        setThemeName(name);
+        if (typeof window !== "undefined") {
+          if (name) localStorage.setItem("fa_theme_name", name);
+          else localStorage.removeItem("fa_theme_name");
+        }
+        if (name) postSessionAction("set_theme", { name });
       };
       const toggleLang = () => {
         const next = !isZh;
@@ -3659,6 +3814,18 @@
             </div>
           )}
 
+          {onboarding && (
+            <OnboardingPanel
+              data={onboarding}
+              isZh={isZh}
+              onDismiss={() => setOnboarding(null)}
+              onRecheck={async () => {
+                const ob = await safeFetch("/api/onboarding");
+                if (ob && ob.ok) { try { setOnboarding(await ob.json()); } catch {} }
+              }}
+            />
+          )}
+
           {leftSession && (
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
               <div className="anim-pop-in w-full max-w-md rounded-[10px] p-5" style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-overlay)" }}>
@@ -3680,6 +3847,9 @@
             isDark={isDark}
             toggleTheme={toggleTheme}
             toggleLang={toggleLang}
+            themeName={themeName}
+            themeOptions={themeOptions}
+            onSelectTheme={selectTheme}
             onAction={async (action, args) => {
               const res = await postSessionAction(action, args);
               if (res && res.ok) {
