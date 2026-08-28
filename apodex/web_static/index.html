@@ -1341,6 +1341,55 @@
       }
       return next;
     }
+
+    function parseComposerInput(text, commands, busy) {
+      const raw = String(text || "").trim();
+      if (!raw) {
+        return { kind: "empty", spec: null, argument: "", error: "" };
+      }
+      if (raw.charAt(0) === "/") {
+        const token = raw.split(/\s+/)[0];
+        const argument = raw.slice(token.length).trim();
+        const lower = token.toLowerCase();
+        const list = commands || [];
+        let spec = null;
+        for (let i = 0; i < list.length; i++) {
+          const item = list[i];
+          if (String(item.name || "").toLowerCase() === lower) {
+            spec = item;
+            break;
+          }
+          const aliases = item.aliases || [];
+          for (let j = 0; j < aliases.length; j++) {
+            if (String(aliases[j]).toLowerCase() === lower) {
+              spec = item;
+              break;
+            }
+          }
+          if (spec) break;
+        }
+        const error = busy && (!spec || spec.available_when_busy === false)
+          ? "busy — interrupt first"
+          : "";
+        return { kind: "slash", spec: spec, argument: argument, error: error };
+      }
+      if (busy) {
+        return { kind: "steer", spec: null, argument: raw, error: "" };
+      }
+      return { kind: "task", spec: null, argument: raw, error: "" };
+    }
+
+    function matchSlashCommands(prefix, commands) {
+      const p = String(prefix || "").toLowerCase();
+      const list = commands || [];
+      if (!p) return list;
+      const hits = [];
+      for (let i = 0; i < list.length; i++) {
+        const name = String(list[i].name || "").toLowerCase();
+        if (name.indexOf(p) === 0) hits.push(list[i]);
+      }
+      return hits;
+    }
     /* FA_PURE_END */
 
     function App() {
@@ -1371,6 +1420,11 @@
       const [rightTab, setRightTab] = useState("outputs");
       const [isWorkspaceModalOpen, setIsWorkspaceModalOpen] = useState(false);
       const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+      const [commands, setCommands] = useState([]);
+      const [paletteOpen, setPaletteOpen] = useState(false);
+      const [paletteQuery, setPaletteQuery] = useState("");
+      const [helpOpen, setHelpOpen] = useState(false);
+      const [leftSession, setLeftSession] = useState(false);
 
       // Conversation & live stream
       const [messages, setMessages] = useState([]);
@@ -1442,10 +1496,27 @@
       }, []);
 
       useEffect(() => {
+        safeFetch("/api/capabilities").then(async (res) => {
+          if (res && res.ok) {
+            try {
+              const data = await res.json();
+              setCommands(data.commands || []);
+            } catch {}
+          }
+        });
+      }, []);
+
+      useEffect(() => {
         const onKey = (e) => {
           if (e.key === "F2") {
             e.preventDefault();
             setIsSettingsOpen(true);
+            return;
+          }
+          const key = e.key.toLowerCase();
+          if ((e.ctrlKey && key === "p") || (e.metaKey && key === "k")) {
+            e.preventDefault();
+            setPaletteOpen(true);
           }
         };
         window.addEventListener("keydown", onKey);
@@ -2051,6 +2122,48 @@
         });
       };
 
+      const slashActionArgs = (action, argument) => {
+        if (action === "rename_session") return { name: argument };
+        if (action === "resume_session") return { session_id: argument };
+        if (action === "switch_workflow") return { mode: argument };
+        if (action === "switch_model") return { model: argument };
+        if (action === "change_cwd") return { path: argument };
+        return {};
+      };
+
+      const handleComposerSubmit = async () => {
+        const text = inputPrompt.trim();
+        if (!text) return;
+        const parsed = parseComposerInput(text, commands, isBusy);
+        if (parsed.kind === "empty") return;
+        if (parsed.kind === "slash") {
+          if (parsed.error) {
+            pushNote(parsed.error, "warn");
+            return;
+          }
+          setInputPrompt("");
+          const name = parsed.spec && parsed.spec.name;
+          if (name === "/help") { setHelpOpen(true); return; }
+          if (name === "/settings") { setIsSettingsOpen(true); return; }
+          if (name === "/exit") { setLeftSession(true); return; }
+          if (parsed.spec && parsed.spec.action) {
+            const res = await postSessionAction(parsed.spec.action, slashActionArgs(parsed.spec.action, parsed.argument));
+            if (res && res.ok) {
+              refreshStatus();
+              refreshWorkspace();
+            } else if (res && res.status === 409) {
+              pushNote("busy — interrupt first", "warn");
+            }
+          }
+          return;
+        }
+        if (parsed.kind === "steer") {
+          await handleSteer();
+          return;
+        }
+        await handleSend();
+      };
+
       const handleApproval = async (decision, confirmation = "") => {
         if (!pendingApproval) return;
         await safeFetch("/api/approve", {
@@ -2567,6 +2680,22 @@
                         boxShadow: isBusy ? "0 0 0 1px var(--accent), 0 2px 10px #0000000b" : "var(--shadow-raised)",
                       }}
                     >
+                      {inputPrompt.startsWith("/") && matchSlashCommands(inputPrompt.split(/\s+/)[0], commands).length > 0 && (
+                        <div className="mb-1 max-h-40 overflow-y-auto rounded-lg p-1" style={{ backgroundColor: "var(--inset)" }}>
+                          {matchSlashCommands(inputPrompt.split(/\s+/)[0], commands).slice(0, 8).map((spec) => (
+                            <button
+                              key={spec.name}
+                              type="button"
+                              onClick={() => setInputPrompt(spec.name + (spec.argument_hint ? " " : ""))}
+                              className="flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1 text-left text-[12px]"
+                              style={{ background: "none", border: "none", color: "var(--ink)" }}
+                            >
+                              <span className="mono">{spec.name}</span>
+                              <span className="truncate pl-3 text-[11px]" style={{ color: "var(--ink-3)" }}>{spec.description}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
                       <textarea
                         rows="2"
                         value={inputPrompt}
@@ -2574,7 +2703,7 @@
                         onKeyDown={(e) => {
                           if (e.key === "Enter" && !e.shiftKey) {
                             e.preventDefault();
-                            if (isBusy) handleSteer(); else handleSend();
+                            handleComposerSubmit();
                           }
                         }}
                         placeholder={
@@ -2616,7 +2745,7 @@
                           <button
                             type="button"
                             disabled={!inputPrompt.trim()}
-                            onClick={isBusy ? handleSteer : handleSend}
+                            onClick={handleComposerSubmit}
                             className="flex size-7 cursor-pointer items-center justify-center rounded-full transition-all duration-150 disabled:cursor-default"
                             style={{
                               backgroundColor: inputPrompt.trim() ? "var(--accent)" : "var(--field)",
@@ -3030,6 +3159,67 @@
             onSelect={handleSelectWorkspace}
             isZh={isZh}
           />
+
+          {paletteOpen && (
+            <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 p-4 pt-[12vh] backdrop-blur-sm" onClick={() => setPaletteOpen(false)}>
+              <div className="anim-pop-in w-full max-w-lg overflow-hidden rounded-[10px]" style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-overlay)" }} onClick={(e) => e.stopPropagation()}>
+                <input
+                  autoFocus
+                  value={paletteQuery}
+                  onChange={(e) => setPaletteQuery(e.target.value)}
+                  placeholder={isZh ? "搜索命令…" : "Search commands…"}
+                  className="w-full px-4 py-3 text-[13px] outline-none"
+                  style={{ backgroundColor: "var(--field)", color: "var(--ink)", border: "none" }}
+                />
+                <div className="max-h-72 overflow-y-auto p-1">
+                  {matchSlashCommands(paletteQuery.startsWith("/") ? paletteQuery : (paletteQuery ? "/" + paletteQuery : "/"), commands).map((spec) => (
+                    <button
+                      key={spec.name}
+                      type="button"
+                      onClick={() => {
+                        setInputPrompt(spec.name + (spec.argument_hint ? " " : ""));
+                        setPaletteOpen(false);
+                        setPaletteQuery("");
+                      }}
+                      className="flex w-full cursor-pointer items-center justify-between rounded-md px-3 py-2 text-left"
+                      style={{ background: "none", border: "none", color: "var(--ink)" }}
+                    >
+                      <span className="mono text-[12.5px]">{spec.name}</span>
+                      <span className="truncate pl-3 text-[11.5px]" style={{ color: "var(--ink-3)" }}>{spec.description}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {helpOpen && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setHelpOpen(false)}>
+              <div className="anim-pop-in max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-[10px] p-5" style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-overlay)" }} onClick={(e) => e.stopPropagation()}>
+                <h3 className="mb-3 text-[13.5px] font-semibold" style={{ color: "var(--ink)" }}>{isZh ? "命令" : "Commands"}</h3>
+                {commands.map((spec) => (
+                  <div key={spec.name} className="mb-1.5 flex justify-between gap-3 text-[12px]">
+                    <span className="mono" style={{ color: "var(--ink)" }}>{spec.name}</span>
+                    <span style={{ color: "var(--ink-3)" }}>{spec.description}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {leftSession && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+              <div className="anim-pop-in w-full max-w-md rounded-[10px] p-5" style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-overlay)" }}>
+                <h3 className="text-[13.5px] font-semibold" style={{ color: "var(--ink)" }}>{isZh ? "已离开此会话视图" : "Left this session view"}</h3>
+                <p className="mt-2 text-[12.5px]" style={{ color: "var(--ink-2)" }}>
+                  {isZh ? "Web 服务仍在运行，不会因此退出。关闭此提示即可继续。" : "The Web server is still running. There is no kill switch. Dismiss this to continue."}
+                </p>
+                <button type="button" onClick={() => setLeftSession(false)} className="mt-4 cursor-pointer rounded-lg px-3 py-1.5 text-[12px] text-white" style={{ backgroundColor: "var(--accent)", border: "none" }}>
+                  {isZh ? "继续" : "Continue"}
+                </button>
+              </div>
+            </div>
+          )}
 
           <SettingsModal
             isOpen={isSettingsOpen}

@@ -24,3 +24,26 @@ describe("snapshot reducer", () => {
     assert.equal(state.lastEventId, 11);
   });
 });
+
+describe("composer parser", () => {
+  it("rejects slash while busy", () => {
+    const { parseComposerInput } = loadPureClient();
+    const commands = [{ name: "/clear", aliases: [], available_when_busy: false }];
+    const result = parseComposerInput("/clear", commands, true);
+    assert.equal(result.kind, "slash");
+    assert.match(result.error, /interrupt first/i);
+  });
+
+  it("queues steer when busy and text is not a slash command", () => {
+    const { parseComposerInput } = loadPureClient();
+    const result = parseComposerInput("stop that", [], true);
+    assert.equal(result.kind, "steer");
+  });
+
+  it("matches unique slash prefixes", () => {
+    const { matchSlashCommands } = loadPureClient();
+    const commands = [{ name: "/clear" }, { name: "/copy" }, { name: "/compact" }];
+    const hits = matchSlashCommands("/cl", commands).map((c) => c.name);
+    assert.equal(hits.join(","), "/clear");
+  });
+});
