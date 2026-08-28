@@ -99,8 +99,8 @@ _DISPATCHABLE_ACTIONS = frozenset({
 # Enable CORS for Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["http://127.0.0.1:3030", "http://localhost:3030"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -231,7 +231,19 @@ class WebAgentManager:
         if self.is_running and action not in self.BUSY_ALLOWED:
             raise ApiError("busy", "A task is running. Interrupt first.")
 
+    def settle_interrupt(self) -> None:
+        from apodex.observers import Decision
+
+        for fut in list(self.approver._pending.values()):
+            if not fut.done():
+                fut.set_result(Decision(False))
+        renderer = self.renderer
+        interrupted = getattr(renderer, "interrupted", None)
+        if callable(interrupted):
+            interrupted()
+
     def interrupt(self) -> bool:
+        self.settle_interrupt()
         if self.is_running and self.active_task and not self.active_task.done():
             self.active_task.cancel()
             self.is_running = False
@@ -537,25 +549,26 @@ async def list_artifacts(session_id: Optional[str] = None) -> dict[str, Any]:
 
 @app.get("/api/file")
 async def read_file_content(path: str) -> dict[str, Any]:
-    from apodex.session_state import _real_user_home, discover_all_run_roots
+    from apodex.session_state import discover_all_run_roots
+    from apodex.web_paths import allowed_file_path
 
     mgr = get_manager()
-    file_path = Path(path).resolve()
+    session = mgr.session
+    inputs_dir = None
+    outputs_dir = os.environ.get("FRONTIER_AGENT_OUTPUTS_DIR")
+    if session is not None:
+        attachments = getattr(session, "attachments", None)
+        inputs_dir = str(getattr(attachments, "agent_dir", "") or "") or None
+    file_path = allowed_file_path(
+        path,
+        cwd=mgr.cwd,
+        session_id=session.session_id if session else "",
+        run_roots=discover_all_run_roots(),
+        inputs_dir=inputs_dir,
+        outputs_dir=outputs_dir,
+    )
 
-    cwd_path = Path(mgr.cwd).resolve()
-    real_home = _real_user_home()
-    allowed_roots = [cwd_path, real_home / ".apodex", real_home] + discover_all_run_roots()
-
-    is_safe = False
-    for allowed in allowed_roots:
-        try:
-            file_path.relative_to(allowed.resolve())
-            is_safe = True
-            break
-        except ValueError:
-            pass
-
-    if not is_safe or not file_path.is_file():
+    if file_path is None or not file_path.is_file():
         raise HTTPException(status_code=403, detail="Access denied or file not found.")
 
     try:

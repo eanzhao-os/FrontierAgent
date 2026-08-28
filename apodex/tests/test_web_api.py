@@ -223,3 +223,47 @@ def test_approve_route_dangerous_confirmation(web_client, web_manager):
         assert decision.approved is True
 
     asyncio.run(body())
+
+
+def test_file_route_rejects_home_escape(web_client, web_manager, tmp_path):
+    secret = tmp_path.parent / f"{tmp_path.name}-home-secret.txt"
+    secret.write_text("nope")
+    res = web_client.get("/api/file", params={"path": str(secret)})
+    assert res.status_code in (403, 404)
+
+
+def test_symlink_escape_is_rejected(web_client, web_manager, tmp_path):
+    sibling = tmp_path.parent / f"{tmp_path.name}-secret.txt"
+    sibling.write_text("secret")
+    sneak = tmp_path / "sneak.txt"
+    sneak.symlink_to(sibling)
+    res = web_client.get("/api/file", params={"path": str(sneak)})
+    assert res.status_code in (403, 404)
+
+
+def test_allowed_file_path_accepts_workspace(tmp_path):
+    from apodex.web_paths import allowed_file_path
+
+    target = tmp_path / "in.txt"
+    target.write_text("ok")
+    assert allowed_file_path(
+        str(target),
+        cwd=str(tmp_path),
+        session_id="s",
+        run_roots=[],
+        inputs_dir=None,
+        outputs_dir=None,
+    ) == target.resolve()
+
+
+def test_interrupt_resolves_pending_approval(web_manager):
+    import asyncio
+
+    async def body():
+        task = asyncio.create_task(web_manager.approver.confirm("bash", "ls", "run"))
+        await asyncio.sleep(0)
+        web_manager.settle_interrupt()
+        decision = await asyncio.wait_for(task, timeout=1)
+        assert decision.approved is False
+
+    asyncio.run(body())

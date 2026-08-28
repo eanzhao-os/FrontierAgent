@@ -462,6 +462,12 @@ class WebRenderer(Renderer):
             },
         )
 
+    def interrupted(self) -> None:
+        for rec in self.activity:
+            if rec.get("state") == "running":
+                rec["state"] = "interrupted"
+        self._set_phase("interrupted")
+
     def changes(self, stats: Any) -> None:
         self._sync_emit("changes_summary", {"stats": stats})
 
