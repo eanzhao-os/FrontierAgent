@@ -1660,11 +1660,17 @@
           pending.toolCalls.push({
             call_id: b.call_id || b.id,
             name: b.name || "tool",
-            args: {},
+            args: b.args || {},
             result: b.content || "",
+            duration_ms: b.duration_ms != null ? b.duration_ms : null,
             is_error: !!b.is_error,
             status: "completed",
           });
+          continue;
+        }
+        if (kind === "thinking") {
+          if (!pending) pending = { id: b.id, role: "assistant", content: "", toolCalls: [], timestamp: 0 };
+          if (b.content) pending.thinking = pending.thinking ? pending.thinking + "\n\n" + b.content : b.content;
           continue;
         }
         if (!pending) pending = { id: b.id, role: "assistant", content: "", toolCalls: [], timestamp: 0 };

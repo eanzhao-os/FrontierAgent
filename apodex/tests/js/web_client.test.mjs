@@ -185,3 +185,24 @@ describe("session title formatting", () => {
     );
   });
 });
+
+describe("snapshot rehydration richness", () => {
+  it("carries args, duration, error flag and thinking into the message", () => {
+    const { blocksToMessages } = loadPureClient();
+    const msgs = blocksToMessages([
+      { id: "b0", kind: "user", content: "go" },
+      { id: "b1", kind: "thinking", content: "plan first" },
+      {
+        id: "b2", kind: "tool", name: "add_task", call_id: "c1",
+        content: "Added ['t1']", args: { tasks: [{ description: "read bazi db" }] },
+        duration_ms: 12, is_error: false,
+      },
+      { id: "b3", kind: "text", content: "done" },
+    ]);
+    assert.equal(msgs[1].thinking, "plan first");
+    const tc = msgs[1].toolCalls[0];
+    assert.deepEqual(tc.args, { tasks: [{ description: "read bazi db" }] });
+    assert.equal(tc.duration_ms, 12);
+    assert.equal(tc.is_error, false);
+  });
+});
