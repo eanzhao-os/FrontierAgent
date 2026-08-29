@@ -268,7 +268,9 @@ class TerminalSession(TaskRunnerMixin):
         from apodex.trace import TraceObserver, default_trace_path
         from apodex.usage import Usage
 
-        if persist_current:
+        # An untouched session (no messages, no name) was never really
+        # created — don't persist it, so it can't linger in the roster.
+        if persist_current and (self.history or self.display_history or self.session_name):
             self._persist()
         previous = self.session_id
         kept_history = list(self.history) if fork else []

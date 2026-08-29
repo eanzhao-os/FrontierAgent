@@ -744,6 +744,10 @@ async def run_task(req: RunRequest) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail="A task is already running.")
     try:
         await mgr.run(req.prompt, req.mode)
+        # First real input makes the session real — persist immediately so it
+        # shows in the roster without waiting for the first turn boundary.
+        if mgr.session:
+            mgr.session._persist()
         return {"status": "started", "mode": mgr.mode}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc

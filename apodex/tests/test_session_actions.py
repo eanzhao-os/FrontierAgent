@@ -124,6 +124,7 @@ def test_archive_and_restore_session(tmp_path, monkeypatch):
     from apodex.session_state import list_saved_sessions
 
     session = _session(tmp_path, monkeypatch)
+    session.history = [user_msg("hi")]
     sid = session.session_id
     actions = SessionActions(session)
 
@@ -150,6 +151,7 @@ def test_pin_and_unpin_session(tmp_path, monkeypatch):
     from apodex.session_state import list_saved_sessions
 
     session = _session(tmp_path, monkeypatch)
+    session.history = [user_msg("hi")]
     sid = session.session_id
     actions = SessionActions(session)
 
@@ -168,6 +170,21 @@ def test_pin_and_unpin_session(tmp_path, monkeypatch):
     saved = list_saved_sessions(workspace=tmp_path)
     current_meta = next(s for s in saved if s["session_id"] == sid)
     assert current_meta["pinned"] is False
+
+
+def test_empty_session_is_not_persisted_or_listed(tmp_path, monkeypatch):
+    from apodex.session_state import list_saved_sessions
+
+    session = _session(tmp_path, monkeypatch)
+    empty_id = session.session_id
+
+    result = SessionActions(session).new_session(fork=False)
+    assert result.ok
+    assert result.data["previous"] == empty_id
+    # No input ever sent → the empty shell was never persisted nor listed
+    assert load_session_state(empty_id) is None
+    ids = [s["session_id"] for s in list_saved_sessions(workspace=tmp_path)]
+    assert empty_id not in ids
 
 
 def test_delete_session(tmp_path, monkeypatch):

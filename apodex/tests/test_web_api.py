@@ -350,6 +350,8 @@ def test_new_session_agent_team_sets_mode_and_id(web_client, web_manager):
 
 
 def test_archive_and_restore_session_endpoints(web_client, web_manager):
+    web_manager.session.history = [{"role": "user", "content": "hi"}]
+    web_manager.session._persist()
     sid = web_manager.session.session_id
 
     # Archive
@@ -374,6 +376,8 @@ def test_archive_and_restore_session_endpoints(web_client, web_manager):
 
 
 def test_pin_session_endpoint(web_client, web_manager):
+    web_manager.session.history = [{"role": "user", "content": "hi"}]
+    web_manager.session._persist()
     sid = web_manager.session.session_id
 
     pin_res = web_client.post(f"/api/sessions/{sid}/pin", json={"pinned": True})
@@ -403,6 +407,15 @@ def test_pin_session_via_actions(web_client, web_manager):
     res = web_client.post("/api/actions", json={"action": "unpin_session", "arguments": {"session_id": sid}})
     assert res.status_code == 200
     assert res.json()["pinned"] is False
+
+
+def test_empty_active_session_not_listed(web_client, web_manager):
+    # Even a persisted empty shell (no messages, no name, no flags) stays out
+    # of the roster — a session becomes real on first real input.
+    web_manager.session._persist()
+    sid = web_manager.session.session_id
+    sessions = web_client.get("/api/sessions").json()["sessions"]
+    assert sid not in [s["session_id"] for s in sessions]
 
 
 def test_delete_session_endpoint(web_client, web_manager):

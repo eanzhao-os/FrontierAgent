@@ -113,6 +113,16 @@ def list_saved_sessions(
             if session_id in seen:
                 continue
             seen.add(session_id)
+            # A session becomes real only on first real input (or an explicit
+            # user action on it) — empty shells stay out of the roster.
+            if not (
+                state.get("history")
+                or state.get("display_history")
+                or state.get("name")
+                or state.get("archived")
+                or state.get("pinned")
+            ):
+                continue
             run_dir_path = str(path.parent.resolve()) if path.name == "session.json" else ""
             default_cwd = str(path.parent.parent.parent) if path.name == "session.json" else "unknown directory"
             sessions.append({
