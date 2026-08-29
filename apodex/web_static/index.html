@@ -2457,7 +2457,7 @@
             } catch {}
           });
 
-          es.addEventListener("final_answer", (e) => {
+          es.addEventListener("final_answer", async (e) => {
             try {
               const payload = JSON.parse(e.data);
               const finalContent = payload.data?.text || activeContentRef.current;
