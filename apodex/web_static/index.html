@@ -1715,10 +1715,17 @@
       const [activeMode, setActiveMode] = useState("react");
       const [isBusy, setIsBusy] = useState(false);
 
-      // Theme presets + onboarding (config not ok → guidance overlay)
+      // Theme presets + onboarding (config not ok → guidance overlay).
+      // A preset applies only when the user picked one HERE (fa_theme_chosen);
+      // otherwise the page follows the system light/dark preference.
       const [themeName, setThemeName] = useState(() => {
-        if (typeof window !== "undefined") return localStorage.getItem("fa_theme_name") || "";
-        return "";
+        if (typeof window === "undefined") return "";
+        if (localStorage.getItem("fa_theme_chosen") !== "1") {
+          // Migration: drop values written by the old server-auto-adoption
+          localStorage.removeItem("fa_theme_name");
+          return "";
+        }
+        return localStorage.getItem("fa_theme_name") || "";
       });
       const [themePresets, setThemePresets] = useState(null);
       const [themeOptions, setThemeOptions] = useState([]);
@@ -1884,26 +1891,24 @@
         });
       }, []);
 
-      // Runtime config: adopt the server-persisted theme, and swap in the
-      // onboarding guidance overlay when the config is not usable yet.
+      // Runtime config: swap in the onboarding guidance overlay when the
+      // config is not usable yet. The server-persisted UserSettings.theme is
+      // NOT auto-applied — it cannot be told apart from its default value,
+      // and forcing it broke system light/dark following. A preset is applied
+      // only from an explicit pick (selectTheme), which persists it.
       useEffect(() => {
         (async () => {
           const res = await safeFetch("/api/config");
           if (!res || !res.ok) return;
           try {
             const cfg = await res.json();
-            if (cfg.theme && themePresets && cfg.theme in themePresets
-                && !localStorage.getItem("fa_theme_name")) {
-              setThemeName(cfg.theme);
-              localStorage.setItem("fa_theme_name", cfg.theme);
-            }
             if (cfg.ok === false) {
               const ob = await safeFetch("/api/onboarding");
               if (ob && ob.ok) setOnboarding(await ob.json());
             }
           } catch {}
         })();
-      }, [themePresets]);
+      }, []);
 
       const postSessionAction = async (action, args) => {
         return safeFetch("/api/actions", {
@@ -1926,8 +1931,16 @@
       const selectTheme = (name) => {
         setThemeName(name);
         if (typeof window !== "undefined") {
-          if (name) localStorage.setItem("fa_theme_name", name);
-          else localStorage.removeItem("fa_theme_name");
+          if (name) {
+            localStorage.setItem("fa_theme_name", name);
+            localStorage.setItem("fa_theme_chosen", "1");
+          } else {
+            // Back to Auto: follow the system again (drop the binary pick too)
+            localStorage.removeItem("fa_theme_name");
+            localStorage.removeItem("fa_theme_chosen");
+            localStorage.removeItem("fa_theme");
+            setIsDark(getSystemDark());
+          }
         }
         if (name) postSessionAction("set_theme", { name });
       };
