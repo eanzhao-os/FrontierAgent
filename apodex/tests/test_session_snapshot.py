@@ -28,3 +28,53 @@ def test_snapshot_has_required_keys_and_redacts_secrets(tmp_path, monkeypatch):
     blob = str(snap)
     assert "sk-secret-value" not in blob
     assert "http://127.0.0.1:8000/v1" not in blob
+
+
+class _RichSession:
+    """Duck-typed session: display_history wire messages + workflow turns."""
+
+    def __init__(self):
+        self.display_history = [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": ""},
+            {"role": "tool", "content": "Added ['t1']", "tool_call_id": "c1"},
+            {"role": "tool", "content": "Updated ['t1']", "tool_call_id": "c2"},
+            {"role": "assistant", "content": "done"},
+        ]
+        self.workflow_turns = [
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {"id": "c1", "function": {"name": "add_task"}},
+                            {"id": "c2", "function": {"name": "update_task"}},
+                        ],
+                    },
+                ]
+            }
+        ]
+
+
+def test_transcript_page_emits_kinds_and_tool_metadata():
+    from apodex.session_snapshot import transcript_page
+
+    page = transcript_page(_RichSession())
+    kinds = [block["kind"] for block in page["blocks"]]
+    assert kinds == ["user", "tool", "tool", "text"]
+    tools = [block for block in page["blocks"] if block["kind"] == "tool"]
+    assert tools[0]["call_id"] == "c1"
+    assert tools[0]["name"] == "add_task"
+    assert tools[1]["name"] == "update_task"
+    assert page["blocks"][-1]["content"] == "done"
+
+
+def test_transcript_page_survives_sessions_without_turns():
+    from apodex.session_snapshot import transcript_page
+
+    session = _RichSession()
+    session.workflow_turns = []
+    page = transcript_page(session)
+    tools = [block for block in page["blocks"] if block["kind"] == "tool"]
+    assert tools and tools[0]["name"] == ""  # no name mapping → blank, not a crash

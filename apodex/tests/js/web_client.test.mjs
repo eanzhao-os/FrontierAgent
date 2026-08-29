@@ -133,3 +133,55 @@ describe("keyboard and reconnect", () => {
     assert.equal(reconnectPlan({ lastEventId: 11, snapshotRequired: false }).mode, "replay");
   });
 });
+
+describe("snapshot rehydration", () => {
+  it("rehydrates structured blocks into card-ready messages", () => {
+    const { blocksToMessages } = loadPureClient();
+    const msgs = blocksToMessages([
+      { id: "b0", kind: "user", content: "go" },
+      { id: "b1", kind: "tool", name: "add_task", call_id: "c1", content: "Added ['t1']" },
+      { id: "b2", kind: "tool", name: "update_task", call_id: "c2", content: "Updated ['t1']" },
+      { id: "b3", kind: "text", content: "done" },
+    ]);
+    assert.equal(msgs.length, 2);
+    assert.equal(msgs[0].role, "user");
+    assert.equal(msgs[0].content, "go");
+    assert.equal(msgs[1].role, "assistant");
+    assert.equal(msgs[1].toolCalls.length, 2);
+    assert.equal(msgs[1].toolCalls[0].name, "add_task");
+    assert.equal(msgs[1].toolCalls[0].result, "Added ['t1']");
+    assert.equal(msgs[1].toolCalls[0].status, "completed");
+    assert.equal(msgs[1].content, "done");
+  });
+
+  it("keeps bare text messages and tolerates legacy flat blocks", () => {
+    const { blocksToMessages } = loadPureClient();
+    const msgs = blocksToMessages([
+      { id: "b0", kind: "text", content: "hello" },
+      { id: "b1", role: "user", content: "legacy" },
+      { id: "b2", role: "assistant", content: "legacy reply" },
+    ]);
+    assert.equal(msgs[1].role, "user");
+    assert.equal(msgs[2].role, "assistant");
+    assert.equal(msgs[2].content, "legacy reply");
+    assert.ok(!msgs[2].toolCalls || msgs[2].toolCalls.length === 0);
+  });
+});
+
+describe("session title formatting", () => {
+  it("formats Agent Team and ReAct sessions correctly", () => {
+    const { formatSessionTitle } = loadPureClient();
+    assert.equal(
+      formatSessionTitle({ session_id: "20260829-153000+0800-agent_team-abcd", mode: "agent_team" }),
+      "Agent Team · abcd"
+    );
+    assert.equal(
+      formatSessionTitle({ session_id: "20260829-153000+0800-react-1234", mode: "react" }),
+      "ReAct · 1234"
+    );
+    assert.equal(
+      formatSessionTitle({ session_id: "20260829-153000+0800-agent_team-abcd", name: "Custom Project", mode: "agent_team" }),
+      "Custom Project"
+    );
+  });
+});

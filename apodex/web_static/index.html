@@ -1639,6 +1639,40 @@
       if (snapshotRequired) return { mode: "snapshot", lastEventId: 0 };
       return { mode: "replay", lastEventId: lastEventId };
     }
+
+    // Rehydrate structured snapshot blocks into card-ready messages:
+    // consecutive tool blocks + the trailing text merge into ONE assistant
+    // message (toolCalls + final content), mirroring the live turn_complete
+    // shape so ThinkingTrace/ToolChipRow/markdown rendering is identical.
+    function blocksToMessages(blocks) {
+      const out = [];
+      let pending = null;
+      const flush = () => { if (pending) { out.push(pending); pending = null; } };
+      for (const b of blocks || []) {
+        const kind = b.kind || (b.role === "user" ? "user" : "text");
+        if (kind === "user") {
+          flush();
+          out.push({ id: b.id, role: "user", content: b.content || "", timestamp: 0 });
+          continue;
+        }
+        if (kind === "tool") {
+          if (!pending) pending = { id: b.id, role: "assistant", content: "", toolCalls: [], timestamp: 0 };
+          pending.toolCalls.push({
+            call_id: b.call_id || b.id,
+            name: b.name || "tool",
+            args: {},
+            result: b.content || "",
+            is_error: !!b.is_error,
+            status: "completed",
+          });
+          continue;
+        }
+        if (!pending) pending = { id: b.id, role: "assistant", content: "", toolCalls: [], timestamp: 0 };
+        if (b.content) pending.content = pending.content ? pending.content + "\n\n" + b.content : b.content;
+      }
+      flush();
+      return out;
+    }
     /* FA_PURE_END */
 
     function OnboardingPanel({ data, isZh, onDismiss, onRecheck }) {
@@ -2154,11 +2188,7 @@
             setActiveContent(snap.stream.content || "");
           }
           if (snap.transcript && Array.isArray(snap.transcript.blocks)) {
-            setMessages(snap.transcript.blocks.map((b) => ({
-              id: b.id,
-              role: b.role,
-              content: b.content || "",
-            })));
+            setMessages(blocksToMessages(snap.transcript.blocks));
             setHasOlder(!!snap.transcript.has_older);
             setOlderCursor(snap.transcript.before || null);
           }

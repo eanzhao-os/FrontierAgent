@@ -25,17 +25,68 @@ def _message_content(message: object) -> tuple[str, str]:
     return role, str(content or "")
 
 
+def _tool_call_names(session: Any) -> dict[str, str]:
+    """Map tool_call_id → tool name from workflow turns, when persisted.
+
+    ``role: "tool"`` wire messages carry only the call id; the name lives on
+    the assistant ``tool_calls`` entries of the owning turn.
+    """
+    names: dict[str, str] = {}
+    for turn in getattr(session, "workflow_turns", None) or []:
+        if not isinstance(turn, dict):
+            continue
+        for message in turn.get("messages", []) or []:
+            if not isinstance(message, dict):
+                continue
+            for call in message.get("tool_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                call_id = str(call.get("id") or "")
+                function = call.get("function") or {}
+                name = str(function.get("name") or "") if isinstance(function, dict) else ""
+                if call_id and name:
+                    names[call_id] = name
+    return names
+
+
 def transcript_page(
     session: Any,
     *,
     before: str | None = None,
     limit: int = _TRANSCRIPT_LIMIT,
 ) -> dict[str, Any]:
+    """Structured transcript blocks so a reload keeps tool calls as cards.
+
+    ``kind`` is one of ``user`` / ``tool`` / ``text``. Tool blocks carry the
+    ``call_id`` and the resolved tool ``name`` so the client can rehydrate
+    them as tool chips instead of bare result text; empty assistant
+    separators are dropped. The legacy ``role`` key stays for older clients.
+    """
     messages = list(getattr(session, "display_history", None) or getattr(session, "history", None) or [])
+    tool_names = _tool_call_names(session)
     all_blocks: list[dict[str, Any]] = []
     for index, message in enumerate(messages):
-        role, content = _message_content(message)
-        all_blocks.append({"id": f"b{index}", "role": role, "content": content})
+        if isinstance(message, dict):
+            role = str(message.get("role") or "")
+            call_id = str(message.get("tool_call_id") or "")
+        else:
+            role = str(getattr(message, "role", "") or "")
+            call_id = str(getattr(message, "tool_call_id", "") or "")
+        _, content = _message_content(message)
+        if role == "tool":
+            all_blocks.append({
+                "id": f"b{index}",
+                "kind": "tool",
+                "role": role,
+                "content": content,
+                "call_id": call_id,
+                "name": tool_names.get(call_id, ""),
+            })
+            continue
+        if not content.strip():
+            continue  # empty assistant separators between tool calls
+        kind = "user" if role == "user" else "text"
+        all_blocks.append({"id": f"b{index}", "kind": kind, "role": role, "content": content})
     end = len(all_blocks)
     if before:
         for index, block in enumerate(all_blocks):
