@@ -79,10 +79,17 @@
     /* ── Motion (bundled durations: 100–500ms, ease-out-strong) ── */
     @keyframes spin { to { transform: rotate(360deg); } }
     @keyframes blink { 50% { opacity: 0; } }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
     @keyframes fade-up { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
     @keyframes pop-in { from { opacity: 0; transform: scale(.85); } to { opacity: 1; transform: none; } }
     .anim-fade-up { animation: fade-up 300ms var(--ease-out-strong) both; }
     .anim-pop-in { animation: pop-in 300ms var(--ease-out-strong) both; }
+    .live-dot { animation: pulse 1.6s infinite; }
+
+    @media (prefers-reduced-motion: reduce) {
+      .anim-fade-up, .anim-pop-in, .live-dot, .spinner, .caret { animation: none !important; }
+      * { scroll-behavior: auto !important; }
+    }
 
     /* Spinner ring — one hairline arc with an accent tip */
     .spinner {
@@ -332,6 +339,20 @@
           <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
         </svg>
       ),
+      archive: () => (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="21 8 21 21 3 21 3 8" />
+          <rect x="1" y="3" width="22" height="5" />
+          <line x1="10" y1="12" x2="14" y2="12" />
+        </svg>
+      ),
+      unarchive: () => (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="21 8 21 21 3 21 3 8" />
+          <rect x="1" y="3" width="22" height="5" />
+          <path d="M12 12v6" /><polyline points="9 15 12 12 15 15" />
+        </svg>
+      ),
       download: () => (
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
@@ -345,6 +366,24 @@
       folder: () => (
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+        </svg>
+      ),
+      dots: () => (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="1.5" /><circle cx="12" cy="5" r="1.5" /><circle cx="12" cy="19" r="1.5" />
+        </svg>
+      ),
+      pin: () => (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 17v5" />
+          <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 6 15.24V16h12v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 14 10.76V6h1a2 2 0 0 0 0-4H9a2 2 0 0 0 0 4h1z" />
+        </svg>
+      ),
+      pinOff: () => (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 17v5" />
+          <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 6 15.24V16h12v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 14 10.76V6h1a2 2 0 0 0 0-4H9a2 2 0 0 0 0 4h1z" />
+          <line x1="2" y1="2" x2="22" y2="22" />
         </svg>
       ),
       plus: () => (
@@ -634,6 +673,135 @@
       );
     }
 
+    /* ── Session card: one roster entry in the sidebar (pinned / active / archived) ── */
+    function SessionCard({ sess, isActive, live, dimmed, isZh, menuOpen, onToggleMenu, onResume, onPin, onRename, onInspect, onArchive, onDelete }) {
+      const [renaming, setRenaming] = useState(false);
+      const [draft, setDraft] = useState("");
+      const sessReact = sess.mode === "react";
+      const tint = sessReact ? "var(--accent-tint)" : "var(--green-tint)";
+      const ink = sessReact ? "var(--accent-ink)" : "var(--green)";
+
+      const startRename = () => { setDraft(sess.name || ""); setRenaming(true); };
+      const submitRename = () => {
+        const name = draft.trim();
+        setRenaming(false);
+        if (name && name !== (sess.name || "")) onRename(sess.session_id, name);
+      };
+
+      const menuItem = (Icon, label, fn, danger) => (
+        <button
+          type="button"
+          onClick={() => { onToggleMenu(null); fn(); }}
+          className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition-colors duration-100"
+          style={{ color: danger ? "var(--red)" : "var(--ink)", background: "none", border: "none" }}
+          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = danger ? "var(--red-tint)" : "var(--hover)"}
+          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
+        >
+          <Icon />
+          <span>{label}</span>
+        </button>
+      );
+
+      return (
+        <div
+          onClick={() => { if (!isActive && !renaming) onResume(sess.session_id); }}
+          className={`group relative cursor-pointer rounded-[10px] px-2.5 py-2 text-[12px] transition-shadow duration-150 ${menuOpen ? "z-50" : "z-0"}`}
+          style={{
+            backgroundColor: isActive ? tint : "var(--surface)",
+            boxShadow: isActive ? "var(--shadow-hairline)" : "var(--shadow-card)",
+            color: isActive ? ink : "var(--ink-2)",
+            opacity: dimmed ? 0.75 : 1,
+          }}
+          onMouseEnter={(e) => { if (!isActive && !menuOpen) e.currentTarget.style.boxShadow = "var(--shadow-raised)"; }}
+          onMouseLeave={(e) => { if (!isActive && !menuOpen) e.currentTarget.style.boxShadow = "var(--shadow-card)"; }}
+        >
+          <div className="flex items-center gap-1.5 pr-7">
+            {live ? (
+              <span className="live-dot size-1.5 shrink-0 rounded-full" style={{ backgroundColor: "var(--green)" }} />
+            ) : (
+              <span className="size-1.5 shrink-0 rounded-full" style={{ backgroundColor: sessReact ? "var(--accent)" : "var(--green)", opacity: dimmed ? 0.6 : 1 }} />
+            )}
+            {renaming ? (
+              <input
+                autoFocus
+                type="text"
+                value={draft}
+                placeholder={formatSessionTitle({ ...sess, name: "" })}
+                onClick={(e) => e.stopPropagation()}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submitRename();
+                  if (e.key === "Escape") setRenaming(false);
+                }}
+                onBlur={submitRename}
+                aria-label={isZh ? "重命名会话" : "Rename session"}
+                className="min-w-0 flex-1 rounded-md px-1 py-0 text-[11.5px] outline-none"
+                style={{ backgroundColor: "var(--field)", boxShadow: "var(--shadow-inset-field)", color: "var(--ink)", border: "none" }}
+              />
+            ) : (
+              <span className="min-w-0 truncate text-[11.5px]" style={{ color: isActive ? "inherit" : "var(--ink)", fontWeight: isActive ? 500 : 400 }}>
+                {formatSessionTitle(sess)}
+              </span>
+            )}
+            {sess.pinned && !renaming && (
+              <span className="shrink-0" style={{ color: isActive ? "inherit" : "var(--accent-ink)" }}><Icons.pin /></span>
+            )}
+            {!renaming && (
+              <span className="mono ml-auto shrink-0 text-[10px]" style={{ color: isActive ? "inherit" : "var(--ink-3)", opacity: isActive ? 0.7 : 1 }}>
+                {sess.modified_at ? sess.modified_at.split(" ")[0].slice(5) : ""}
+              </span>
+            )}
+          </div>
+          <div className="mt-0.5 flex items-center gap-2 pl-3 text-[10.5px]" style={{ color: isActive ? "inherit" : "var(--ink-3)", opacity: isActive ? 0.75 : 1 }}>
+            <span>{sess.message_count} {isZh ? "消息" : "msgs"}</span>
+            {sess.file_count > 0 && <span>{sess.file_count} {isZh ? "文件" : "files"}</span>}
+            {sess.outputs_count > 0 && <span>{sess.outputs_count} {isZh ? "产物" : "outputs"}</span>}
+            {sess.workspace_name && (
+              <span className="mono ml-auto flex min-w-0 items-center gap-0.5 truncate">
+                <Icons.folder />
+                <span className="truncate">{sess.workspace_name}</span>
+              </span>
+            )}
+          </div>
+
+          {/* Three-dot menu trigger */}
+          <div className="absolute right-1.5 top-1.5">
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onToggleMenu(menuOpen ? null : sess.session_id); }}
+              className={`cursor-pointer rounded p-1 transition-colors duration-100 ${menuOpen ? "flex" : "hidden group-hover:flex"}`}
+              style={{
+                backgroundColor: menuOpen ? "var(--surface)" : "transparent",
+                color: "var(--ink-2)",
+                boxShadow: menuOpen ? "var(--shadow-btn)" : "none",
+                border: "none",
+              }}
+              title={isZh ? "会话操作" : "Session options"}
+            >
+              <Icons.dots />
+            </button>
+
+            {menuOpen && (
+              <div
+                className="anim-pop-in absolute right-0 top-7 z-50 min-w-[130px] rounded-lg p-1 text-[11.5px]"
+                style={{ backgroundColor: "var(--surface)", border: "1px solid var(--line)", boxShadow: "var(--shadow-overlay)" }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {menuItem(sess.pinned ? Icons.pinOff : Icons.pin, sess.pinned ? (isZh ? "取消置顶" : "Unpin") : (isZh ? "置顶" : "Pin"), () => onPin(sess.session_id, !sess.pinned))}
+                {menuItem(Icons.pencil, isZh ? "重命名" : "Rename", startRename)}
+                {menuItem(Icons.history, isZh ? "查看痕迹" : "Inspect trace", () => onInspect(sess.session_id))}
+                <div className="my-1 border-t" style={{ borderColor: "var(--line)" }} />
+                {dimmed
+                  ? menuItem(Icons.unarchive, isZh ? "取消归档" : "Restore", () => onArchive(sess.session_id, false))
+                  : menuItem(Icons.archive, isZh ? "归档会话" : "Archive", () => onArchive(sess.session_id, true))}
+                {menuItem(Icons.trash, isZh ? "彻底删除" : "Delete", () => onDelete(sess.session_id), true)}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     /* ── Approval card: one question, visible preview, explicit submit ── */
     function ApprovalCard({ approval, feedback, setFeedback, onResolve, isZh }) {
       const dangerous = !!(approval.dangerous && String(approval.dangerous).trim());
@@ -911,14 +1079,9 @@
                style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-overlay)" }}
                onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b px-5 py-3.5" style={{ borderColor: "var(--line)" }}>
-              <div>
-                <h3 className="text-[13.5px] font-semibold" style={{ color: "var(--ink)" }}>
-                  {isZh ? "工作区与运行目录" : "Workspaces"}
-                </h3>
-                <p className="mt-0.5 text-[11px]" style={{ color: "var(--ink-3)" }}>
-                  {isZh ? "配置多个工程目录，历史会话与产物将跨工作区汇总" : "Watch multiple project roots; sessions and deliverables aggregate across them"}
-                </p>
-              </div>
+              <h3 className="text-[13.5px] font-semibold" style={{ color: "var(--ink)" }}>
+                {isZh ? "工作区" : "Workspaces"}
+              </h3>
               <button
                 type="button"
                 onClick={onClose}
@@ -1105,14 +1268,9 @@
                style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-overlay)" }}
                onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b px-5 py-3.5" style={{ borderColor: "var(--line)" }}>
-              <div>
-                <h3 className="text-[13.5px] font-semibold" style={{ color: "var(--ink)" }}>
-                  {isZh ? "设置" : "Settings"}
-                </h3>
-                <p className="mt-0.5 text-[11px]" style={{ color: "var(--ink-3)" }}>
-                  {isZh ? "F2 打开 · 工作流切换会重置对话上下文" : "F2 to open · switching workflow resets conversation context"}
-                </p>
-              </div>
+              <h3 className="text-[13.5px] font-semibold" style={{ color: "var(--ink)" }}>
+                {isZh ? "设置" : "Settings"}
+              </h3>
               <button type="button" onClick={onClose} className="cursor-pointer rounded-lg p-1.5" style={{ color: "var(--ink-3)", background: "none", border: "none" }}>
                 <Icons.close />
               </button>
@@ -1633,6 +1791,18 @@
       return null;
     }
 
+    function formatSessionTitle(sess) {
+      if (!sess) return "";
+      if (sess.name) return String(sess.name);
+      const sid = String(sess.session_id || "");
+      const mode = String(sess.mode || "");
+      const suffix = sid.split("-").pop() || sid.slice(-4);
+      if (mode === "agent_team") return `Agent Team · ${suffix}`;
+      if (mode === "react") return `ReAct · ${suffix}`;
+      if (mode) return `${mode} · ${suffix}`;
+      return sid.slice(-10) || "Session";
+    }
+
     function reconnectPlan(info) {
       const lastEventId = (info && info.lastEventId) || 0;
       const snapshotRequired = !!(info && info.snapshotRequired);
@@ -1816,9 +1986,11 @@
       const [activeCwd, setActiveCwd] = useState("");
       const [diffData, setDiffData] = useState(null);
       const [revertReport, setRevertReport] = useState(null);
-      const [fileLocations, setFileLocations] = useState(null);
       const [artifacts, setArtifacts] = useState([]);
       const [savedSessions, setSavedSessions] = useState([]);
+      const [showArchived, setShowArchived] = useState(false);
+      const [sessionQuery, setSessionQuery] = useState("");
+      const [openMenuSessionId, setOpenMenuSessionId] = useState(null);
       const [inspectSession, setInspectSession] = useState(null);
       const [previewFile, setPreviewFile] = useState(null);
       const [revertArmed, setRevertArmed] = useState(false);
@@ -2023,7 +2195,6 @@
           try {
             const a = await artRes.json();
             setArtifacts(a.artifacts || []);
-            if (a.locations) setFileLocations(a.locations);
           } catch {}
         }
         if (sessRes && sessRes.ok) { try { const s = await sessRes.json(); setSavedSessions(s.sessions || []); } catch {} }
@@ -2169,6 +2340,57 @@
         if (res && res.ok) { try { setInspectSession(await res.json()); } catch {} }
       };
 
+      const handleArchiveSession = async (sessionId, archived = true) => {
+        const res = await safeFetch(`/api/sessions/${sessionId}/archive`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ archived }),
+        });
+        if (res && res.ok) {
+          refreshWorkspace();
+          if (inspectSession && inspectSession.session_id === sessionId) {
+            setInspectSession((prev) => (prev ? { ...prev, state: { ...(prev.state || {}), archived } } : null));
+          }
+        }
+      };
+
+      const handleDeleteSession = async (sessionId) => {
+        const confirmMsg = isZh
+          ? "确定要彻底删除该会话及其所有运行记录吗？此操作无法撤销。"
+          : "Are you sure you want to permanently delete this session and all its run records? This action cannot be undone.";
+        if (!window.confirm(confirmMsg)) return;
+
+        const res = await safeFetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+        if (res && res.ok) {
+          const data = await res.json().catch(() => ({}));
+          refreshWorkspace();
+          if (inspectSession && inspectSession.session_id === sessionId) {
+            setInspectSession(null);
+          }
+          if (data.active_reset || (status && status.session_id === sessionId)) {
+            resetStreamState();
+            refreshStatus();
+          }
+        }
+      };
+
+      const handlePinSession = async (sessionId, pinned) => {
+        setSavedSessions((prev) => prev.map((s) => (s.session_id === sessionId ? { ...s, pinned } : s)));
+        await safeFetch(`/api/sessions/${sessionId}/pin`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pinned }),
+        });
+        refreshWorkspace();
+      };
+
+      const handleRenameSession = async (sessionId, name) => {
+        setSavedSessions((prev) => prev.map((s) => (s.session_id === sessionId ? { ...s, name } : s)));
+        const res = await postSessionAction("rename_session", { session_id: sessionId, name });
+        if (!res || !res.ok) pushNote(isZh ? "重命名失败" : "Rename failed", "warn");
+        refreshWorkspace();
+      };
+
       const pushNote = useCallback((text, tone) => {
         setMessages((prev) => [...prev, { id: `note-${Date.now()}-${prev.length}`, role: "note", content: text, tone: tone || "info", timestamp: Date.now() }]);
       }, []);
@@ -2308,6 +2530,8 @@
           });
 
           es.addEventListener("workspaces_updated", () => { refreshWorkspace(); });
+
+          es.addEventListener("sessions_updated", () => { refreshWorkspace(); });
 
           es.addEventListener("workspace_changed", () => {
             resetStreamState();
@@ -2721,6 +2945,19 @@
       }, [board]);
 
       const transcriptBlocks = useMemo(() => messagesToTranscriptBlocks(messages), [messages]);
+
+      // Sidebar roster: search filter → pinned / active / archived sections
+      const filteredSessions = useMemo(() => {
+        const q = sessionQuery.trim().toLowerCase();
+        if (!q) return savedSessions;
+        return savedSessions.filter((s) =>
+          formatSessionTitle(s).toLowerCase().includes(q)
+          || String(s.session_id || "").toLowerCase().includes(q)
+          || String(s.workspace_name || "").toLowerCase().includes(q));
+      }, [savedSessions, sessionQuery]);
+      const pinnedSessions = useMemo(() => filteredSessions.filter((s) => s.pinned && !s.archived), [filteredSessions]);
+      const activeSessions = useMemo(() => filteredSessions.filter((s) => !s.pinned && !s.archived), [filteredSessions]);
+      const archivedSessions = useMemo(() => filteredSessions.filter((s) => s.archived), [filteredSessions]);
       const visibleBlocks = useMemo(() => {
         const mode = transcriptQuery && transcriptFilter === "all" ? "search" : transcriptFilter;
         return filterTranscript(transcriptBlocks, mode, transcriptQuery);
@@ -2835,7 +3072,7 @@
           {/* ─────────── 1. LEFT SIDEBAR: workspaces & sessions ─────────── */}
           {showLeftSidebar && (
             <aside
-              className={`hidden shrink-0 select-none flex-col overflow-hidden border-r lg:flex lg:w-60 ${mobileNavOpen ? "fixed bottom-0 left-0 top-0 z-40 flex w-72" : ""}`}
+              className={`hidden shrink-0 select-none flex-col overflow-hidden border-r lg:flex lg:w-[232px] ${mobileNavOpen ? "fixed bottom-0 left-0 top-0 z-40 flex w-72" : ""}`}
               style={{ backgroundColor: "var(--canvas)", borderColor: "var(--line)", boxShadow: mobileNavOpen ? "var(--shadow-overlay)" : undefined }}
               aria-label={isZh ? "导航" : "Navigation"}
             >
@@ -2892,9 +3129,10 @@
                 </div>
               </div>
 
+              {/* Sessions: search + pinned / active / archived card sections */}
               <div className="flex items-center justify-between px-4 pb-1 pt-2">
                 <span className="text-[11px] font-medium" style={{ color: "var(--ink-3)" }}>
-                  {isZh ? "全部工作区会话" : "Recent"}
+                  {isZh ? "会话" : "Sessions"}
                 </span>
                 <button
                   type="button"
@@ -2909,60 +3147,138 @@
                 </button>
               </div>
 
-              <div className="flex-1 space-y-0.5 overflow-y-auto px-2 py-1">
-                {savedSessions.length === 0 ? (
+              <div className="px-3 pb-1">
+                <div className="flex items-center gap-1.5 rounded-lg px-2 py-1.5" style={{ backgroundColor: "var(--field)", boxShadow: "var(--shadow-inset-field)" }}>
+                  <span style={{ color: "var(--ink-3)" }}><Icons.search /></span>
+                  <input
+                    type="text"
+                    value={sessionQuery}
+                    onChange={(e) => setSessionQuery(e.target.value)}
+                    placeholder={isZh ? "搜索会话…" : "Filter sessions…"}
+                    aria-label={isZh ? "搜索会话" : "Filter sessions"}
+                    className="min-w-0 flex-1 bg-transparent text-[11.5px] outline-none"
+                    style={{ color: "var(--ink)", border: "none" }}
+                  />
+                  {sessionQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSessionQuery("")}
+                      className="cursor-pointer rounded p-0.5"
+                      style={{ color: "var(--ink-3)", background: "none", border: "none" }}
+                      aria-label={isZh ? "清除搜索" : "Clear search"}
+                    >
+                      <Icons.x />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="relative flex-1 space-y-1 overflow-y-auto px-2 py-1">
+                {openMenuSessionId && (
+                  <div
+                    className="fixed inset-0 z-40"
+                    onClick={() => setOpenMenuSessionId(null)}
+                  />
+                )}
+                {filteredSessions.length === 0 ? (
                   <div className="p-4 text-center text-[11.5px]" style={{ color: "var(--ink-3)" }}>
-                    {isZh ? "暂无历史会话" : "No saved sessions"}
+                    {sessionQuery.trim()
+                      ? (isZh ? "没有匹配的会话" : "No matching sessions")
+                      : (isZh ? "暂无历史会话" : "No saved sessions")}
                   </div>
                 ) : (
-                  savedSessions.map((sess) => {
-                    const isActive = sess.is_current;
-                    const sessReact = sess.mode === "react";
-                    return (
-                      <div
+                  <>
+                    {pinnedSessions.length > 0 && (
+                      <>
+                        <div className="flex items-center gap-1 px-2.5 pb-0.5 pt-1 text-[10.5px] font-semibold uppercase tracking-wider" style={{ color: "var(--ink-3)" }}>
+                          <Icons.pin />
+                          <span>{isZh ? `置顶 (${pinnedSessions.length})` : `Pinned (${pinnedSessions.length})`}</span>
+                        </div>
+                        {pinnedSessions.map((sess) => (
+                          <SessionCard
+                            key={sess.session_id}
+                            sess={sess}
+                            isActive={sess.is_current}
+                            live={sess.is_current && isBusy}
+                            isZh={isZh}
+                            menuOpen={openMenuSessionId === sess.session_id}
+                            onToggleMenu={setOpenMenuSessionId}
+                            onResume={handleResumeSession}
+                            onPin={handlePinSession}
+                            onRename={handleRenameSession}
+                            onInspect={handleInspectSession}
+                            onArchive={handleArchiveSession}
+                            onDelete={handleDeleteSession}
+                          />
+                        ))}
+                        {activeSessions.length > 0 && (
+                          <div className="px-2.5 pb-0.5 pt-2 text-[10.5px] font-semibold uppercase tracking-wider" style={{ color: "var(--ink-3)" }}>
+                            {isZh ? "会话" : "Sessions"}
+                          </div>
+                        )}
+                      </>
+                    )}
+                    {activeSessions.map((sess) => (
+                      <SessionCard
                         key={sess.session_id}
-                        onClick={() => { if (!isActive) handleResumeSession(sess.session_id); }}
-                        className="group relative cursor-pointer rounded-lg px-2.5 py-2 text-[12px] transition-colors duration-100"
-                        style={{
-                          backgroundColor: isActive ? (sessReact ? "var(--accent-tint)" : "var(--green-tint)") : "transparent",
-                          color: isActive ? (sessReact ? "var(--accent-ink)" : "var(--green)") : "var(--ink-2)",
-                        }}
-                        onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.backgroundColor = "var(--hover)"; }}
-                        onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.backgroundColor = "transparent"; }}
-                      >
-                        <div className="flex items-center gap-1.5">
-                          <span className="size-1.5 shrink-0 rounded-full"
-                                style={{ backgroundColor: sessReact ? "var(--accent)" : "var(--green)" }} />
-                          <span className="min-w-0 truncate text-[11.5px]" style={{ color: isActive ? "inherit" : "var(--ink)", fontWeight: isActive ? 500 : 400 }}>
-                            {sess.name || sess.session_id.slice(-10)}
-                          </span>
-                          <span className="mono ml-auto shrink-0 text-[10px]" style={{ color: "var(--ink-3)" }}>
-                            {sess.modified_at ? sess.modified_at.split(" ")[0].slice(5) : ""}
-                          </span>
-                        </div>
-                        <div className="mt-0.5 flex items-center gap-2 pl-3 text-[10.5px]" style={{ color: "var(--ink-3)" }}>
-                          <span>{sess.message_count} {isZh ? "消息" : "msgs"}</span>
-                          {sess.file_count > 0 && <span>{sess.file_count} {isZh ? "文件" : "files"}</span>}
-                          {sess.outputs_count > 0 && <span>{sess.outputs_count} {isZh ? "产物" : "outputs"}</span>}
-                          {sess.workspace_name && (
-                            <span className="mono ml-auto flex min-w-0 items-center gap-0.5 truncate">
-                              <Icons.folder />
-                              <span className="truncate">{sess.workspace_name}</span>
-                            </span>
-                          )}
-                        </div>
+                        sess={sess}
+                        isActive={sess.is_current}
+                        live={sess.is_current && isBusy}
+                        isZh={isZh}
+                        menuOpen={openMenuSessionId === sess.session_id}
+                        onToggleMenu={setOpenMenuSessionId}
+                        onResume={handleResumeSession}
+                        onPin={handlePinSession}
+                        onRename={handleRenameSession}
+                        onInspect={handleInspectSession}
+                        onArchive={handleArchiveSession}
+                        onDelete={handleDeleteSession}
+                      />
+                    ))}
+
+                    {archivedSessions.length > 0 && (
+                      <div className="pt-2">
                         <button
                           type="button"
-                          onClick={(e) => { e.stopPropagation(); handleInspectSession(sess.session_id); }}
-                          className="anim-pop-in absolute right-2 top-2 hidden cursor-pointer rounded-md p-1 group-hover:flex"
-                          style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-btn)", color: "var(--ink-2)", border: "none" }}
-                          title={isZh ? "查看痕迹详情" : "Inspect trace"}
+                          onClick={() => setShowArchived((prev) => !prev)}
+                          className="flex w-full cursor-pointer items-center justify-between rounded-lg px-2.5 py-1.5 text-[11px] font-medium transition-colors duration-100"
+                          style={{ color: "var(--ink-3)", background: "none", border: "none" }}
+                          onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "var(--hover)"}
+                          onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
                         >
-                          <Icons.history />
+                          <span className="flex items-center gap-1.5">
+                            <Icons.archive />
+                            <span>{isZh ? `已归档 (${archivedSessions.length})` : `Archived (${archivedSessions.length})`}</span>
+                          </span>
+                          <span style={{ transform: showArchived ? "rotate(180deg)" : "none", transition: "transform 150ms" }}>
+                            <Icons.chevronDown />
+                          </span>
                         </button>
+                        {showArchived && (
+                          <div className="mt-1 space-y-1">
+                            {archivedSessions.map((sess) => (
+                              <SessionCard
+                                key={sess.session_id}
+                                sess={sess}
+                                isActive={sess.is_current}
+                                live={false}
+                                dimmed
+                                isZh={isZh}
+                                menuOpen={openMenuSessionId === sess.session_id}
+                                onToggleMenu={setOpenMenuSessionId}
+                                onResume={handleResumeSession}
+                                onPin={handlePinSession}
+                                onRename={handleRenameSession}
+                                onInspect={handleInspectSession}
+                                onArchive={handleArchiveSession}
+                                onDelete={handleDeleteSession}
+                              />
+                            ))}
+                          </div>
+                        )}
                       </div>
-                    );
-                  })
+                    )}
+                  </>
                 )}
               </div>
 
@@ -3153,7 +3469,7 @@
                     if (el.scrollHeight - el.scrollTop - el.clientHeight > 180) setFollowTail(false);
                   }}
                 >
-                  <div className="mx-auto flex max-w-[760px] flex-col gap-4">
+                  <div className="mx-auto flex max-w-[680px] flex-col gap-4">
                     <div className="flex flex-wrap items-center gap-1.5">
                       {[["all", isZh ? "全部" : "All"], ["thinking", isZh ? "思考" : "Thinking"], ["tools", isZh ? "工具" : "Tools"], ["errors", isZh ? "错误" : "Errors"], ["report", isZh ? "报告" : "Report"]].map(([key, label]) => (
                         <button
@@ -3214,14 +3530,12 @@
                           <Icons.apodexMark className="size-9" />
                         </div>
                         <h3 className="mb-1 text-[16px] font-semibold" style={{ color: "var(--ink)" }}>
-                          {modeIsReact
-                            ? (isZh ? "Apodex ReAct 单智能体会话" : "Apodex ReAct session")
-                            : (isZh ? "Apodex Agent Team 协作会话" : "Apodex Agent Team session")}
+                          {modeIsReact ? "ReAct" : "Agent Team"}
                         </h3>
                         <p className="mb-5 text-[12.5px] leading-relaxed" style={{ color: "var(--ink-2)" }}>
                           {modeIsReact
-                            ? (isZh ? "单个有状态 Agent 自主调研、读写文件、执行命令并迭代，所有变更需你审批且可撤销。" : "One stateful agent researches, edits files and runs commands — every change needs your approval and is revertible.")
-                            : (isZh ? "协调器维护任务看板，把独立子任务分派给并行子 Agent，汇总报告并给出结论。" : "A coordinator keeps a task board, delegates independent work to parallel sub-agents, then synthesizes their reports.")}
+                            ? (isZh ? "调研、改文件、跑命令；变更需审批、可撤销。" : "Researches, edits, runs commands — changes need approval and are revertible.")
+                            : (isZh ? "协调器拆解任务到看板，并行子 Agent 执行后汇总。" : "A coordinator delegates to parallel sub-agents, then synthesizes.")}
                         </p>
                         <div className="flex flex-wrap justify-center gap-2">
                           {(modeIsReact
@@ -3338,7 +3652,7 @@
 
                 {/* Composer — one control surface; steer mode while running */}
                 <footer className="shrink-0 px-6 pb-4 pt-2">
-                  <div className="mx-auto max-w-[760px]">
+                  <div className="mx-auto max-w-[680px]">
                     {steerFlash && (
                       <div className="anim-fade-up mb-1.5 flex items-center gap-1.5 px-1 text-[11px]" style={{ color: "var(--accent-ink)" }}>
                         <Icons.steer />
@@ -3597,8 +3911,8 @@
                           <div className="rounded-[10px] p-4 text-center text-[12px] leading-relaxed"
                                style={{ backgroundColor: "var(--inset)", boxShadow: "var(--shadow-hairline)", color: "var(--ink-3)" }}>
                             {isZh
-                              ? "Agent 通过 add_task / update_task 拆解与推进任务后，看板将在此实时呈现"
-                              : "Once the agent decomposes work via add_task / update_task, the board appears here live"}
+                              ? "Agent 拆解任务后实时呈现"
+                              : "Live once the agent decomposes work"}
                           </div>
                         ) : (
                           <div className="overflow-hidden rounded-[10px]" style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-card)" }}>
@@ -3666,20 +3980,6 @@
                           >
                             <Icons.refresh /><span>{isZh ? "刷新" : "Refresh"}</span>
                           </button>
-                        </div>
-
-                        {/* Formal deliverable locations — Host / Agent / Work, mirroring the TUI title bar */}
-                        <div className="rounded-lg px-2.5 py-2" style={{ backgroundColor: "var(--inset)", boxShadow: "var(--shadow-hairline)" }}>
-                          {[
-                            fileLocations?.host_outputs ? { label: "Host", value: fileLocations.host_outputs } : null,
-                            { label: "Agent", value: fileLocations?.agent_outputs || "" },
-                            fileLocations?.work ? { label: "Work", value: `${fileLocations.work}${isZh ? "（过程文件）" : " (intermediate)"}` } : null,
-                            status?.session_id ? { label: "Run", value: `.apodex/runs/${status.session_id}/` } : null,
-                          ].filter(Boolean).map((loc) => (
-                            <div key={loc.label} className="mono mt-0.5 break-all text-[10.5px] leading-snug" style={{ color: "var(--ink-2)" }}>
-                              <span className="font-semibold" style={{ color: "var(--ink-3)" }}>{loc.label}: </span>{loc.value}
-                            </div>
-                          ))}
                         </div>
 
                         {[
@@ -3771,8 +4071,8 @@
                           <div className="rounded-[10px] p-4 text-center text-[12px] leading-relaxed"
                                style={{ backgroundColor: "var(--inset)", boxShadow: "var(--shadow-hairline)", color: "var(--ink-3)" }}>
                             {isZh
-                              ? "Agent Team 模式下，协调器创建的子 Agent 将在此实时显示"
-                              : "In Agent Team mode, sub-agents spawned by the coordinator appear here live"}
+                              ? "子 Agent 实时状态"
+                              : "Live sub-agent status"}
                           </div>
                         ) : (
                           <div className="space-y-2">
@@ -3989,7 +4289,7 @@
               <div className="anim-pop-in w-full max-w-md rounded-[10px] p-5" style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-overlay)" }}>
                 <h3 className="text-[13.5px] font-semibold" style={{ color: "var(--ink)" }}>{isZh ? "已离开此会话视图" : "Left this session view"}</h3>
                 <p className="mt-2 text-[12.5px]" style={{ color: "var(--ink-2)" }}>
-                  {isZh ? "Web 服务仍在运行，不会因此退出。关闭此提示即可继续。" : "The Web server is still running. There is no kill switch. Dismiss this to continue."}
+                  {isZh ? "Web 服务仍在运行。" : "The Web server is still running."}
                 </p>
                 <button type="button" onClick={() => setLeftSession(false)} className="mt-4 cursor-pointer rounded-lg px-3 py-1.5 text-[12px] text-white" style={{ backgroundColor: "var(--accent)", border: "none" }}>
                   {isZh ? "继续" : "Continue"}
@@ -4169,9 +4469,30 @@
 
                 <div className="flex items-center justify-between border-t px-5 py-3" style={{ borderColor: "var(--line)", backgroundColor: "var(--field)" }}>
                   <span className="text-[11.5px]" style={{ color: "var(--ink-3)" }}>
+                    {inspectSession.state?.archived ? (isZh ? "（已归档）" : "(Archived) ") : ""}
                     {isZh ? `将以 ${inspectSession.state?.mode} 模式恢复该会话` : `Resumes in ${inspectSession.state?.mode} mode`}
                   </span>
-                  <div className="flex gap-2">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteSession(inspectSession.session_id)}
+                      className="flex cursor-pointer items-center gap-1 rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors duration-100"
+                      style={{ backgroundColor: "var(--red-tint)", color: "var(--red)", border: "none" }}
+                      title={isZh ? "彻底删除该会话" : "Delete session"}
+                    >
+                      <Icons.trash />
+                      <span>{isZh ? "删除" : "Delete"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleArchiveSession(inspectSession.session_id, !inspectSession.state?.archived)}
+                      className="flex cursor-pointer items-center gap-1 rounded-lg px-3 py-1.5 text-[12px] font-medium transition-colors duration-100"
+                      style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-btn)", color: "var(--ink-2)", border: "none" }}
+                      title={inspectSession.state?.archived ? (isZh ? "取消归档" : "Restore") : (isZh ? "归档会话" : "Archive")}
+                    >
+                      {inspectSession.state?.archived ? <Icons.unarchive /> : <Icons.archive />}
+                      <span>{inspectSession.state?.archived ? (isZh ? "取消归档" : "Restore") : (isZh ? "归档" : "Archive")}</span>
+                    </button>
                     <button
                       type="button"
                       onClick={() => setInspectSession(null)}

@@ -175,6 +175,8 @@ class TerminalSession(TaskRunnerMixin):
         activate_run(self.session_id, cwd)
         _stamp, self.created_at, self.local_timezone = new_run_timestamp()
         self.session_name = ""
+        self.archived = False
+        self.pinned = False
         self._activate_session_workspace(self.session_id, cwd)
         self._activate_session_outputs(self.session_id, cwd)
         from apodex.attachments import AttachmentManager
@@ -247,7 +249,12 @@ class TerminalSession(TaskRunnerMixin):
 
         return cleanup_overflow_process()
 
-    def start_new_session(self, *, fork: bool = False) -> tuple[str, str]:
+    def start_new_session(
+        self,
+        *,
+        fork: bool = False,
+        persist_current: bool = True,
+    ) -> tuple[str, str]:
         """Save the current checkpoint and switch to a fresh session identity.
 
         A fork retains model-visible conversation history. A plain new session
@@ -261,7 +268,8 @@ class TerminalSession(TaskRunnerMixin):
         from apodex.trace import TraceObserver, default_trace_path
         from apodex.usage import Usage
 
-        self._persist()
+        if persist_current:
+            self._persist()
         previous = self.session_id
         kept_history = list(self.history) if fork else []
         kept_display_history = list(self.display_history) if fork else []
@@ -272,6 +280,8 @@ class TerminalSession(TaskRunnerMixin):
         self._activate_session_workspace(self.session_id, self.cwd)
         self._activate_session_outputs(self.session_id, self.cwd)
         self.session_name = ""
+        self.archived = False
+        self.pinned = False
         self.history = kept_history
         self.display_history = kept_display_history
         self.workflow_turns = kept_turns
@@ -285,7 +295,8 @@ class TerminalSession(TaskRunnerMixin):
         os.environ["FRONTIER_AGENT_INPUTS_DIR"] = str(self.attachments.agent_dir)
         self.trace_path = default_trace_path(self.session_id)
         self.tracer = TraceObserver(self.trace_path, mode=self.mode, cwd=self.cwd)
-        self._persist()
+        if fork:
+            self._persist()
         return previous, self.session_id
 
     def rename_session(self, name: str) -> str:
@@ -613,6 +624,8 @@ class TerminalSession(TaskRunnerMixin):
                     "created_at": self.created_at,
                     "local_timezone": self.local_timezone,
                     "name": self.session_name,
+                    "archived": bool(getattr(self, "archived", False)),
+                    "pinned": bool(getattr(self, "pinned", False)),
                     "mode": self.mode,
                     "cwd": self.cwd,
                     "model": self.cfg.model,
@@ -645,6 +658,8 @@ class TerminalSession(TaskRunnerMixin):
         from apodex.changes import WorkspaceJournal
         from apodex.todo import TodoItem, clear_todos, set_todos
         self.session_name = str(state.get("name") or "")
+        self.archived = bool(state.get("archived", False))
+        self.pinned = bool(state.get("pinned", False))
         self.created_at = str(state.get("created_at") or self.created_at)
         self.local_timezone = str(state.get("local_timezone") or self.local_timezone)
         saved_outputs = state.get("outputs") or {}

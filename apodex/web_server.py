@@ -95,6 +95,12 @@ _DISPATCHABLE_ACTIONS = frozenset({
     "revert_changes",
     "rename_session",
     "resume_session",
+    "archive_session",
+    "unarchive_session",
+    "restore_session",
+    "delete_session",
+    "pin_session",
+    "unpin_session",
     "set_plan_mode",
     "set_verbose",
     "set_auto_approve",
@@ -127,6 +133,14 @@ class ModeRequest(BaseModel):
 
 class NewSessionRequest(BaseModel):
     mode: str = "react"
+
+
+class ArchiveSessionRequest(BaseModel):
+    archived: bool = True
+
+
+class PinSessionRequest(BaseModel):
+    pinned: bool = True
 
 
 class WorkspaceRequest(BaseModel):
@@ -633,7 +647,8 @@ async def post_action(req: ActionRequest) -> dict[str, Any]:
         actions = SessionActions(mgr.session)
         args = req.arguments or {}
         if req.action == "new_session":
-            result = actions.new_session(fork=False)
+            mode = str(args.get("mode") or "")
+            result = actions.new_session(mode=mode or None, fork=False)
             mgr.broadcaster.clear()
         elif req.action == "fork_session":
             result = actions.new_session(fork=True)
@@ -642,9 +657,24 @@ async def post_action(req: ActionRequest) -> dict[str, Any]:
         elif req.action == "revert_changes":
             result = actions.revert_changes()
         elif req.action == "rename_session":
-            result = actions.rename_session(str(args.get("name", "")))
+            result = actions.rename_session(str(args.get("name", "")), session_id=str(args.get("session_id", "")))
         elif req.action == "resume_session":
             result = actions.resume_session(str(args.get("session_id", "")))
+        elif req.action == "archive_session":
+            sid = str(args.get("session_id") or "")
+            archived = bool(args.get("archived", True))
+            result = actions.archive_session(sid, archived=archived)
+        elif req.action in ("unarchive_session", "restore_session"):
+            sid = str(args.get("session_id") or "")
+            result = actions.archive_session(sid, archived=False)
+        elif req.action in ("pin_session", "unpin_session"):
+            sid = str(args.get("session_id") or "")
+            result = actions.pin_session(sid, pinned=(req.action == "pin_session"))
+        elif req.action == "delete_session":
+            sid = str(args.get("session_id") or "")
+            result = actions.delete_session(sid)
+            if result.ok and result.data.get("active_reset"):
+                mgr.broadcaster.clear()
         elif req.action == "set_plan_mode":
             result = actions.set_plan_mode(bool(args.get("active")))
         elif req.action == "set_verbose":
@@ -1053,6 +1083,8 @@ async def list_all_sessions() -> dict[str, Any]:
             "outputs_count": out_count,
             "run_dir": str(run_dir.resolve()),
             "is_current": bool(mgr.session and mgr.session.session_id == sid),
+            "archived": bool(s.get("archived", False) or detail.get("archived", False)),
+            "pinned": bool(s.get("pinned", False) or detail.get("pinned", False)),
         })
     return {"sessions": results}
 
@@ -1143,7 +1175,7 @@ async def create_new_session(req: NewSessionRequest) -> dict[str, Any]:
         if not mgr.session:
             mgr._init_session(mode)
         assert mgr.session is not None
-        result = SessionActions(mgr.session).new_session(fork=False)
+        result = SessionActions(mgr.session).new_session(mode=mode, fork=False)
         mgr.mode = mgr.session.mode
         mgr.revision += 1
         mgr.broadcaster.clear()
@@ -1154,6 +1186,75 @@ async def create_new_session(req: NewSessionRequest) -> dict[str, Any]:
         payload = action_http(result)
         payload["mode"] = mgr.mode
         return payload
+
+
+@app.post("/api/sessions/{session_id}/archive")
+async def archive_saved_session(session_id: str, req: ArchiveSessionRequest | None = None) -> dict[str, Any]:
+    mgr = get_manager()
+    async with mgr._lock:
+        session_id = normalize_session_id(session_id) or session_id
+        if not mgr.session:
+            mgr._init_session(mgr.mode)
+        assert mgr.session is not None
+        archived = req.archived if req is not None else True
+        result = SessionActions(mgr.session).archive_session(session_id, archived=archived)
+        mgr.revision += 1
+        await mgr.broadcaster.emit("sessions_updated", {"session_id": session_id, "archived": archived})
+        return action_http(result)
+
+
+@app.post("/api/sessions/{session_id}/restore")
+async def restore_saved_session_archive(session_id: str) -> dict[str, Any]:
+    mgr = get_manager()
+    async with mgr._lock:
+        session_id = normalize_session_id(session_id) or session_id
+        if not mgr.session:
+            mgr._init_session(mgr.mode)
+        assert mgr.session is not None
+        result = SessionActions(mgr.session).archive_session(session_id, archived=False)
+        mgr.revision += 1
+        await mgr.broadcaster.emit("sessions_updated", {"session_id": session_id, "archived": False})
+        return action_http(result)
+
+
+@app.post("/api/sessions/{session_id}/pin")
+async def pin_saved_session(session_id: str, req: PinSessionRequest | None = None) -> dict[str, Any]:
+    mgr = get_manager()
+    async with mgr._lock:
+        session_id = normalize_session_id(session_id) or session_id
+        if not mgr.session:
+            mgr._init_session(mgr.mode)
+        assert mgr.session is not None
+        pinned = req.pinned if req is not None else True
+        result = SessionActions(mgr.session).pin_session(session_id, pinned=pinned)
+        mgr.revision += 1
+        await mgr.broadcaster.emit("sessions_updated", {"session_id": session_id, "pinned": pinned})
+        return action_http(result)
+
+
+@app.delete("/api/sessions/{session_id}")
+@app.post("/api/sessions/{session_id}/delete")
+async def delete_saved_session(session_id: str) -> dict[str, Any]:
+    mgr = get_manager()
+    async with mgr._lock:
+        mgr.require_idle("delete_session")
+        session_id = normalize_session_id(session_id) or session_id
+        if not mgr.session:
+            mgr._init_session(mgr.mode)
+        assert mgr.session is not None
+        is_active = (mgr.session.session_id == session_id)
+        result = SessionActions(mgr.session).delete_session(session_id)
+        if not result.ok:
+            raise ApiError(result.code, result.message)
+        if is_active:
+            mgr.broadcaster.clear()
+            await mgr.broadcaster.emit(
+                "session_created",
+                {"session_id": mgr.session.session_id, "mode": mgr.mode},
+            )
+        mgr.revision += 1
+        await mgr.broadcaster.emit("sessions_updated", {"session_id": session_id, "deleted": True})
+        return action_http(result)
 
 
 @app.get("/api/workspaces")

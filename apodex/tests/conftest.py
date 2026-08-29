@@ -32,5 +32,6 @@ def web_manager(tmp_path, monkeypatch):
 @pytest.fixture
 def web_client(web_manager):
     from fastapi.testclient import TestClient
+
     import apodex.web_server as ws
     return TestClient(ws.app)

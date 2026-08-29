@@ -19,6 +19,9 @@ def _session_state_path(session_id: str) -> str:
 
 
 def _real_user_home() -> Path:
+    env_home = os.environ.get("HOME")
+    if env_home:
+        return Path(env_home).resolve()
     import pwd
     try:
         return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
@@ -73,6 +76,7 @@ def list_saved_sessions(
     Searches across workspace-local run roots as well as machine-wide discovered roots.
     """
     import json
+
     from apodex.run_layout import local_time_from_timestamp, runs_root
 
     all_roots = discover_all_run_roots(extra_roots)
@@ -119,7 +123,126 @@ def list_saved_sessions(
                 "message_count": len(state.get("history") or state.get("display_history") or []),
                 "modified_at": local_time_from_timestamp(path.stat().st_mtime),
                 "run_dir": run_dir_path,
+                "archived": bool(state.get("archived", False)),
+                "pinned": bool(state.get("pinned", False)),
             })
         except Exception:
             continue
     return sessions
+
+
+def _set_session_flag(
+    session_id: str,
+    key: str,
+    value: bool,
+    extra_roots: list[str] | None = None,
+) -> bool:
+    """Update a flag field in session.json for the given session id."""
+    return _set_session_field(session_id, key, bool(value), extra_roots)
+
+
+def _set_session_field(
+    session_id: str,
+    key: str,
+    value,
+    extra_roots: list[str] | None = None,
+) -> bool:
+    """Update a field in session.json for the given session id."""
+    import json
+
+    from apodex.run_layout import runs_root
+
+    all_roots = discover_all_run_roots(extra_roots)
+    all_roots.extend(_legacy_session_roots())
+    if extra_roots:
+        for r in extra_roots:
+            all_roots.append(runs_root(r).resolve())
+
+    updated = False
+    for root in all_roots:
+        for cand in (root / session_id / "session.json", root / f"{session_id}.json"):
+            if cand.is_file():
+                try:
+                    data = json.loads(cand.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        data[key] = value
+                        cand.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                        updated = True
+                except Exception:
+                    pass
+    return updated
+
+
+def set_session_archived(
+    session_id: str,
+    *,
+    archived: bool = True,
+    extra_roots: list[str] | None = None,
+) -> bool:
+    """Update archived flag in session.json for the given session id."""
+    return _set_session_flag(session_id, "archived", archived, extra_roots)
+
+
+def set_session_pinned(
+    session_id: str,
+    *,
+    pinned: bool = True,
+    extra_roots: list[str] | None = None,
+) -> bool:
+    """Update pinned flag in session.json for the given session id."""
+    return _set_session_flag(session_id, "pinned", pinned, extra_roots)
+
+
+def set_session_name(
+    session_id: str,
+    name: str,
+    extra_roots: list[str] | None = None,
+) -> bool:
+    """Update the display name in session.json for the given session id."""
+    return _set_session_field(session_id, "name", name, extra_roots)
+
+
+def delete_session_run(
+    session_id: str,
+    extra_roots: list[str] | None = None,
+) -> bool:
+    """Permanently delete session run directory and legacy session files."""
+    import shutil
+
+    from apodex.run_layout import runs_root
+
+    deleted = False
+
+    state = load_session_state(session_id)
+    if state and isinstance(state, dict) and "_run_dir" in state:
+        rd = Path(state["_run_dir"])
+        if rd.is_dir():
+            try:
+                shutil.rmtree(rd)
+                deleted = True
+            except Exception:
+                pass
+
+    all_roots = discover_all_run_roots(extra_roots)
+    all_roots.extend(_legacy_session_roots())
+    if extra_roots:
+        for r in extra_roots:
+            all_roots.append(runs_root(r).resolve())
+
+    for root in all_roots:
+        cand = root / session_id
+        if cand.is_dir():
+            try:
+                shutil.rmtree(cand)
+                deleted = True
+            except Exception:
+                pass
+        cand_legacy = root / f"{session_id}.json"
+        if cand_legacy.is_file():
+            try:
+                cand_legacy.unlink()
+                deleted = True
+            except Exception:
+                pass
+    return deleted
+

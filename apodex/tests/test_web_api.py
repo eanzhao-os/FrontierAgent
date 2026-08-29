@@ -339,6 +339,87 @@ def test_diff_endpoint_reports_attributed_change(web_client, web_manager, tmp_pa
     assert data["revertable"] is True
 
 
+def test_new_session_agent_team_sets_mode_and_id(web_client, web_manager):
+    res = web_client.post("/api/sessions/new", json={"mode": "agent_team"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["mode"] == "agent_team"
+    assert "-agent_team-" in data["session_id"]
+    assert web_manager.mode == "agent_team"
+    assert web_manager.session.mode == "agent_team"
+
+
+def test_archive_and_restore_session_endpoints(web_client, web_manager):
+    sid = web_manager.session.session_id
+
+    # Archive
+    arch_res = web_client.post(f"/api/sessions/{sid}/archive", json={"archived": True})
+    assert arch_res.status_code == 200
+    assert arch_res.json()["archived"] is True
+
+    # List sessions shows archived is True
+    sessions = web_client.get("/api/sessions").json()["sessions"]
+    matched = next(s for s in sessions if s["session_id"] == sid)
+    assert matched["archived"] is True
+
+    # Restore
+    rest_res = web_client.post(f"/api/sessions/{sid}/restore")
+    assert rest_res.status_code == 200
+    assert rest_res.json()["archived"] is False
+
+    # List sessions shows archived is False
+    sessions = web_client.get("/api/sessions").json()["sessions"]
+    matched = next(s for s in sessions if s["session_id"] == sid)
+    assert matched["archived"] is False
+
+
+def test_pin_session_endpoint(web_client, web_manager):
+    sid = web_manager.session.session_id
+
+    pin_res = web_client.post(f"/api/sessions/{sid}/pin", json={"pinned": True})
+    assert pin_res.status_code == 200
+    assert pin_res.json()["pinned"] is True
+
+    sessions = web_client.get("/api/sessions").json()["sessions"]
+    matched = next(s for s in sessions if s["session_id"] == sid)
+    assert matched["pinned"] is True
+
+    unpin_res = web_client.post(f"/api/sessions/{sid}/pin", json={"pinned": False})
+    assert unpin_res.status_code == 200
+    assert unpin_res.json()["pinned"] is False
+
+    sessions = web_client.get("/api/sessions").json()["sessions"]
+    matched = next(s for s in sessions if s["session_id"] == sid)
+    assert matched["pinned"] is False
+
+
+def test_pin_session_via_actions(web_client, web_manager):
+    sid = web_manager.session.session_id
+
+    res = web_client.post("/api/actions", json={"action": "pin_session", "arguments": {"session_id": sid}})
+    assert res.status_code == 200
+    assert res.json()["pinned"] is True
+
+    res = web_client.post("/api/actions", json={"action": "unpin_session", "arguments": {"session_id": sid}})
+    assert res.status_code == 200
+    assert res.json()["pinned"] is False
+
+
+def test_delete_session_endpoint(web_client, web_manager):
+    from apodex.run_layout import run_dir
+
+    sid = web_manager.session.session_id
+    r_dir = run_dir(sid, workspace=web_manager.cwd)
+    assert r_dir.is_dir()
+
+    del_res = web_client.delete(f"/api/sessions/{sid}")
+    assert del_res.status_code == 200
+    assert del_res.json()["deleted"] is True
+    assert not r_dir.exists()
+    assert web_manager.session.session_id != sid
+
+
+
 def test_artifacts_include_deliverable_locations(web_client):
     data = web_client.get("/api/artifacts").json()
     assert set(data["locations"]) >= {"host_outputs", "agent_outputs", "work"}

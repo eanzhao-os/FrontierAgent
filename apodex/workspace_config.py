@@ -1,12 +1,15 @@
+import contextlib
 import json
 import os
 import pwd
 from pathlib import Path
-from typing import Any, Optional
 
 
 def get_real_user_home() -> Path:
-    """Resolve the real user home directory, bypassing any sandbox overrides."""
+    """Resolve the real user home directory, respecting HOME if set."""
+    env_home = os.environ.get("HOME")
+    if env_home:
+        return Path(env_home).resolve()
     try:
         return Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
     except Exception:
@@ -74,10 +77,8 @@ def save_configured_paths(paths: list[str]) -> None:
             if resolved not in seen:
                 seen.add(resolved)
                 clean_paths.append(resolved)
-    try:
+    with contextlib.suppress(Exception):
         cfg_file.write_text(json.dumps({"workspaces": clean_paths}, indent=2, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
 
 
 def add_workspace_path(path: str) -> list[str]:
@@ -99,7 +100,7 @@ def remove_workspace_path(path: str) -> list[str]:
     return updated
 
 
-def get_all_configured_run_roots(extra_roots: Optional[list[str]] = None) -> list[Path]:
+def get_all_configured_run_roots(extra_roots: list[str] | None = None) -> list[Path]:
     """Return all .apodex/runs paths from all configured workspaces without hardcoding."""
     roots: set[Path] = set()
 

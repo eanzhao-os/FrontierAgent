@@ -43,7 +43,13 @@ class SessionActions:
     def __init__(self, session: TerminalSession) -> None:
         self.session = session
 
-    def new_session(self, *, fork: bool = False) -> ActionResult:
+    def new_session(self, *, mode: str | None = None, fork: bool = False) -> ActionResult:
+        from apodex.profiles import terminal_mode_names
+
+        if mode and mode in terminal_mode_names() and mode != self.session.mode:
+            switch_res = self.switch_workflow(mode)
+            if not switch_res.ok:
+                return switch_res
         previous, current = self.session.start_new_session(fork=fork)
         if fork:
             message = f"saved {previous}\nforked context into {current}"
@@ -53,10 +59,94 @@ class SessionActions:
             True,
             "ok",
             message,
-            {"previous": previous, "session_id": current},
+            {"previous": previous, "session_id": current, "mode": self.session.mode},
         )
 
-    def rename_session(self, name: str) -> ActionResult:
+    def archive_session(self, session_id: str = "", *, archived: bool = True) -> ActionResult:
+        from apodex.session_state import set_session_archived
+
+        sid = session_id.strip() if session_id else self.session.session_id
+        if not sid:
+            return ActionResult(False, "validation", "session_id required", {})
+        action_name = "archived" if archived else "restored"
+        if self.session.session_id == sid:
+            self.session.archived = archived
+            self.session._persist()
+            return ActionResult(
+                True,
+                "ok",
+                f"session {sid} {action_name}",
+                {"session_id": sid, "archived": archived},
+            )
+
+        ok = set_session_archived(sid, archived=archived, extra_roots=[str(self.session.cwd)])
+        if not ok:
+            return ActionResult(False, "not_found", f"could not find session {sid}", {})
+        return ActionResult(
+            True,
+            "ok",
+            f"session {sid} {action_name}",
+            {"session_id": sid, "archived": archived},
+        )
+
+    def pin_session(self, session_id: str = "", *, pinned: bool = True) -> ActionResult:
+        from apodex.session_state import set_session_pinned
+
+        sid = session_id.strip() if session_id else self.session.session_id
+        if not sid:
+            return ActionResult(False, "validation", "session_id required", {})
+        action_name = "pinned" if pinned else "unpinned"
+        if self.session.session_id == sid:
+            self.session.pinned = pinned
+            self.session._persist()
+            return ActionResult(
+                True,
+                "ok",
+                f"session {sid} {action_name}",
+                {"session_id": sid, "pinned": pinned},
+            )
+
+        ok = set_session_pinned(sid, pinned=pinned, extra_roots=[str(self.session.cwd)])
+        if not ok:
+            return ActionResult(False, "not_found", f"could not find session {sid}", {})
+        return ActionResult(
+            True,
+            "ok",
+            f"session {sid} {action_name}",
+            {"session_id": sid, "pinned": pinned},
+        )
+
+    def delete_session(self, session_id: str = "") -> ActionResult:
+        from apodex.session_state import delete_session_run
+
+        sid = session_id.strip() if session_id else self.session.session_id
+        if not sid:
+            return ActionResult(False, "validation", "session_id required", {})
+        is_active = (self.session.session_id == sid)
+        if is_active:
+            self.session.start_new_session(fork=False, persist_current=False)
+        ok = delete_session_run(sid, extra_roots=[str(self.session.cwd)])
+        if not ok and not is_active:
+            return ActionResult(False, "not_found", f"could not find session {sid}", {})
+        return ActionResult(
+            True,
+            "ok",
+            f"session {sid} deleted",
+            {"session_id": sid, "deleted": True, "active_reset": is_active},
+        )
+
+    def rename_session(self, name: str, session_id: str = "") -> ActionResult:
+        sid = session_id.strip() if session_id else ""
+        if sid and sid != self.session.session_id:
+            from apodex.session_state import set_session_name
+
+            clean = name.strip()
+            if not clean:
+                return ActionResult(False, "validation", "name required", {})
+            ok = set_session_name(sid, clean, extra_roots=[str(self.session.cwd)])
+            if not ok:
+                return ActionResult(False, "not_found", f"could not find session {sid}", {})
+            return ActionResult(True, "ok", f"session {sid} renamed → {clean}", {"session_id": sid, "name": clean})
         try:
             clean = self.session.rename_session(name)
         except ValueError as exc:
@@ -442,6 +532,16 @@ class SessionActions:
             return self.trace_path()
         if action == "list_sessions":
             return self.list_sessions()
+        if action == "archive_session":
+            return self.archive_session(argument, archived=True)
+        if action in ("restore_session", "unarchive_session"):
+            return self.archive_session(argument, archived=False)
+        if action == "pin_session":
+            return self.pin_session(argument, pinned=True)
+        if action == "unpin_session":
+            return self.pin_session(argument, pinned=False)
+        if action == "delete_session":
+            return self.delete_session(argument)
         if action == "run_init":
             return ActionResult(True, "ok", "", {})
         return ActionResult(False, "validation", f"unknown action {action!r}", {})

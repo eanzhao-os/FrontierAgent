@@ -108,3 +108,83 @@ def test_slash_adapter_uses_actions(tmp_path, monkeypatch):
     session.history = [{"role": "user", "content": "x"}]
     assert asyncio.run(session._slash("/clear")) is False
     assert session.history == []
+
+
+def test_new_session_with_mode_switches_workflow(tmp_path, monkeypatch):
+
+    session = _session(tmp_path, monkeypatch, mode="react")
+    assert session.mode == "react"
+    result = SessionActions(session).new_session(mode="agent_team")
+    assert result.ok
+    assert session.mode == "agent_team"
+    assert "-agent_team-" in session.session_id
+
+
+def test_archive_and_restore_session(tmp_path, monkeypatch):
+    from apodex.session_state import list_saved_sessions
+
+    session = _session(tmp_path, monkeypatch)
+    sid = session.session_id
+    actions = SessionActions(session)
+
+    # Archive active session
+    res_arch = actions.archive_session(sid, archived=True)
+    assert res_arch.ok
+    assert res_arch.data["archived"] is True
+    assert session.archived is True
+    saved = list_saved_sessions(workspace=tmp_path)
+    current_meta = next(s for s in saved if s["session_id"] == sid)
+    assert current_meta["archived"] is True
+
+    # Restore active session
+    res_res = actions.archive_session(sid, archived=False)
+    assert res_res.ok
+    assert res_res.data["archived"] is False
+    assert session.archived is False
+    saved = list_saved_sessions(workspace=tmp_path)
+    current_meta = next(s for s in saved if s["session_id"] == sid)
+    assert current_meta["archived"] is False
+
+
+def test_pin_and_unpin_session(tmp_path, monkeypatch):
+    from apodex.session_state import list_saved_sessions
+
+    session = _session(tmp_path, monkeypatch)
+    sid = session.session_id
+    actions = SessionActions(session)
+
+    res_pin = actions.pin_session(sid, pinned=True)
+    assert res_pin.ok
+    assert res_pin.data["pinned"] is True
+    assert session.pinned is True
+    saved = list_saved_sessions(workspace=tmp_path)
+    current_meta = next(s for s in saved if s["session_id"] == sid)
+    assert current_meta["pinned"] is True
+
+    res_unpin = actions.pin_session(sid, pinned=False)
+    assert res_unpin.ok
+    assert res_unpin.data["pinned"] is False
+    assert session.pinned is False
+    saved = list_saved_sessions(workspace=tmp_path)
+    current_meta = next(s for s in saved if s["session_id"] == sid)
+    assert current_meta["pinned"] is False
+
+
+def test_delete_session(tmp_path, monkeypatch):
+    from apodex.run_layout import run_dir
+
+    session = _session(tmp_path, monkeypatch)
+    sid = session.session_id
+    r_dir = run_dir(sid, workspace=tmp_path)
+    assert r_dir.is_dir()
+
+    actions = SessionActions(session)
+    res = actions.delete_session(sid)
+    assert res.ok
+    assert res.data["deleted"] is True
+    assert res.data["active_reset"] is True
+    # Previous run directory is removed
+    assert not r_dir.exists()
+    # A fresh session is started
+    assert session.session_id != sid
+
