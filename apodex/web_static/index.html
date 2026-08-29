@@ -414,6 +414,13 @@
       const m = Math.floor(s / 60);
       return `${m}m ${s % 60}s`;
     }
+    /* Durations: sub-second stays ms, then seconds, then m s — never raw "232573ms" */
+    function fmtMs(ms) {
+      if (ms == null) return "";
+      if (ms < 1000) return `${Math.round(ms)}ms`;
+      if (ms < 10000) return `${(ms / 1000).toFixed(1)}s`;
+      return fmtElapsed(ms);
+    }
     function fmtKB(size) {
       return `${(size / 1024).toFixed(1)} KB`;
     }
@@ -450,8 +457,9 @@
             const o = typeof u === "object" ? u : {};
             return `${o.id || "?"}${o.resolution ? ` → ${o.resolution.replace("_", " ")}` : ""}`;
           });
-          return parts.join(", ").slice(0, 42);
+          return parts.join(", ").slice(0, 64);
         }
+        if (["collect_reports", "submit_report", "finish_planning"].includes(name)) return "";
         if (["write_file", "edit_file", "create_file", "file_editor_create", "file_editor_str_replace", "delete_file", "read_file", "view_file", "read_text", "file_editor_view", "view_image", "download_file"].includes(name)) {
           return args.path || args.file_path || args.filename || args.target_file || "";
         }
@@ -531,7 +539,7 @@
         <div className="anim-fade-up">
           <div
             onClick={() => setExpanded(!expanded)}
-            className="-mx-1.5 flex h-7 w-[calc(100%+12px)] min-w-0 cursor-pointer select-none items-center gap-2 rounded-lg px-1.5 transition-colors duration-100"
+            className="flex h-7 w-full min-w-0 cursor-pointer select-none items-center gap-2 px-3 transition-colors duration-100"
             style={{ backgroundColor: expanded ? "var(--hover)" : undefined }}
             onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "var(--hover)"; }}
             onMouseLeave={(e) => { if (!expanded) e.currentTarget.style.backgroundColor = "transparent"; }}
@@ -567,7 +575,7 @@
               </button>
             )}
             <span className="mono ml-auto shrink-0 text-[10.5px] tabular-nums" style={{ color: isRunning ? "var(--accent-ink)" : "var(--ink-3)" }}>
-              {isRunning ? (isZh ? "执行中" : "running") : (tool.duration_ms != null ? `${tool.duration_ms}ms` : "")}
+              {isRunning ? (isZh ? "执行中" : "running") : fmtMs(tool.duration_ms)}
             </span>
             <span className="shrink-0 transition-transform duration-200" style={{ transform: expanded ? "rotate(180deg)" : "rotate(0deg)", color: "var(--ink-3)" }}>
               <Icons.chevronDown />
@@ -575,7 +583,7 @@
           </div>
 
           {expanded && (
-            <div className="anim-fade-up mb-2 ml-6 mt-1 space-y-2 rounded-lg p-2.5 text-[11px]"
+            <div className="anim-fade-up mx-2 mb-2 mt-1 space-y-2 rounded-lg p-2.5 text-[11px]"
                  style={{ backgroundColor: "var(--inset)", boxShadow: "var(--shadow-hairline)" }}>
               {tool.args && Object.keys(tool.args).length > 0 && (
                 <div>
@@ -608,6 +616,121 @@
                   </pre>
                 </div>
               )}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    /* ── Tool calls card: one card per turn; runs of ≥3 identical calls collapse ── */
+    function groupToolCalls(toolCalls) {
+      const groups = [];
+      const list = toolCalls || [];
+      let i = 0;
+      while (i < list.length) {
+        let j = i;
+        while (j + 1 < list.length && list[j + 1].name === list[i].name) j++;
+        const run = list.slice(i, j + 1);
+        if (run.length >= 3) groups.push({ key: `g-${i}`, name: list[i].name, items: run });
+        else run.forEach((tc, k) => groups.push({ key: tc.call_id || `s-${i + k}`, single: tc }));
+        i = j + 1;
+      }
+      return groups;
+    }
+
+    function ToolGroupRow({ name, items, isZh, onOpenPreview }) {
+      const [open, setOpen] = useState(false);
+      const anyRunning = items.some((t) => t.status === "running" || t.status === "executing");
+      const errCount = items.filter((t) => t.status === "error" || t.is_error).length;
+      const totalMs = items.reduce((acc, t) => acc + (t.duration_ms || 0), 0);
+      return (
+        <div className="anim-fade-up">
+          <div
+            onClick={() => setOpen(!open)}
+            className="flex h-7 w-full min-w-0 cursor-pointer select-none items-center gap-2 px-3 transition-colors duration-100"
+            style={{ backgroundColor: open ? "var(--hover)" : undefined }}
+            onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = "var(--hover)"; }}
+            onMouseLeave={(e) => { if (!open) e.currentTarget.style.backgroundColor = "transparent"; }}
+          >
+            <span className="flex size-4 shrink-0 items-center justify-center"
+                  style={{ color: errCount ? "var(--red)" : anyRunning ? "var(--accent)" : "var(--ink-3)" }}>
+              {anyRunning ? <Spinner size={11} /> : errCount ? <Icons.x /> : <span style={{ color: "var(--green)" }}><Icons.check /></span>}
+            </span>
+            <span className="flex shrink-0 items-center" style={{ color: "var(--ink-3)" }}>{getToolIcon(name)}</span>
+            <span className="mono shrink-0 text-[12px] font-medium" style={{ color: "var(--ink)" }}>{name}</span>
+            <span className="shrink-0 rounded-full px-1.5 py-px text-[10px] font-medium tabular-nums"
+                  style={{ backgroundColor: "var(--field)", boxShadow: "var(--shadow-hairline)", color: "var(--ink-2)" }}>
+              ×{items.length}
+            </span>
+            {errCount > 0 && (
+              <span className="shrink-0 rounded-full px-1.5 py-px text-[10px] font-medium"
+                    style={{ backgroundColor: "var(--red-tint)", color: "var(--red)" }}>
+                {errCount} {isZh ? "失败" : "failed"}
+              </span>
+            )}
+            <span className="mono ml-auto shrink-0 text-[10.5px] tabular-nums" style={{ color: anyRunning ? "var(--accent-ink)" : "var(--ink-3)" }}>
+              {anyRunning ? (isZh ? "执行中" : "running") : (totalMs > 0 ? fmtMs(totalMs) : "")}
+            </span>
+            <span className="shrink-0 transition-transform duration-200" style={{ transform: open ? "rotate(180deg)" : "rotate(0deg)", color: "var(--ink-3)" }}>
+              <Icons.chevronDown />
+            </span>
+          </div>
+          {open && (
+            <div className="border-t" style={{ borderColor: "var(--line)" }}>
+              {items.map((tc, i) => (
+                <div key={tc.call_id || i} style={{ borderTop: i > 0 ? "1px solid var(--line)" : "none" }}>
+                  <ToolChipRow tool={tc} isZh={isZh} onOpenPreview={onOpenPreview} />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function ToolCallsCard({ toolCalls, isZh, onOpenPreview, live }) {
+      // Live turns stay open; settled walls of calls collapse to the summary header
+      const [open, setOpen] = useState(() => !!live || (toolCalls || []).length <= 6);
+      const groups = useMemo(() => groupToolCalls(toolCalls), [toolCalls]);
+      const runningCount = (toolCalls || []).filter((t) => t.status === "running" || t.status === "executing").length;
+      const errCount = (toolCalls || []).filter((t) => t.status === "error" || t.is_error).length;
+      const totalMs = (toolCalls || []).reduce((acc, t) => acc + (t.duration_ms || 0), 0);
+      return (
+        <div className="anim-fade-up overflow-hidden rounded-[10px]"
+             style={{ backgroundColor: "var(--surface)", boxShadow: "var(--shadow-card)" }}>
+          <button
+            type="button"
+            onClick={() => setOpen(!open)}
+            className="flex w-full cursor-pointer select-none items-center gap-2 px-3 py-2 text-left text-[12px] transition-colors duration-100"
+            style={{ color: runningCount ? "var(--accent-ink)" : "var(--ink-2)", fontWeight: 500, background: "none", border: "none" }}
+            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "var(--hover)"}
+            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
+          >
+            <span style={{ color: "var(--ink-3)" }}><Icons.terminal /></span>
+            <span>{isZh ? `工具调用 · ${(toolCalls || []).length}` : `Tool calls · ${(toolCalls || []).length}`}</span>
+            {runningCount > 0 && <Spinner size={10} />}
+            {errCount > 0 && (
+              <span className="rounded-full px-1.5 py-px text-[10px] font-medium"
+                    style={{ backgroundColor: "var(--red-tint)", color: "var(--red)" }}>
+                {errCount} {isZh ? "失败" : "failed"}
+              </span>
+            )}
+            {totalMs > 0 && (
+              <span className="mono ml-auto text-[10.5px] tabular-nums" style={{ color: "var(--ink-3)" }}>{fmtMs(totalMs)}</span>
+            )}
+            <span className={`transition-transform duration-200 ${totalMs > 0 ? "" : "ml-auto"}`} style={{ transform: open ? "rotate(180deg)" : "rotate(0deg)", color: "var(--ink-3)" }}>
+              <Icons.chevronDown />
+            </span>
+          </button>
+          {open && (
+            <div>
+              {groups.map((g, i) => (
+                <div key={g.key} style={{ borderTop: "1px solid var(--line)" }}>
+                  {g.items
+                    ? <ToolGroupRow name={g.name} items={g.items} isZh={isZh} onOpenPreview={onOpenPreview} />
+                    : <ToolChipRow tool={g.single} isZh={isZh} onOpenPreview={onOpenPreview} />}
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -3076,8 +3199,8 @@
               style={{ backgroundColor: "var(--canvas)", borderColor: "var(--line)", boxShadow: mobileNavOpen ? "var(--shadow-overlay)" : undefined }}
               aria-label={isZh ? "导航" : "Navigation"}
             >
-              <div className="flex items-center justify-between px-3 pb-1 pt-3">
-                <div className="flex items-center gap-2.5">
+              <div className="flex items-center justify-between gap-2 px-3 pb-1 pt-3">
+                <div className="flex min-w-0 flex-1 items-center gap-2.5">
                   <div className="flex size-7 items-center justify-center rounded-lg border shadow-2xs shrink-0"
                        style={{ backgroundColor: "var(--surface)", borderColor: "var(--line)", color: "var(--ink)" }}>
                     <Icons.apodexMark className="size-5" />
@@ -3085,14 +3208,14 @@
                   <div className="min-w-0">
                     <h1 className="text-[13.5px] font-semibold leading-none tracking-tight" style={{ color: "var(--ink)" }}>Apodex</h1>
                     <span className="mono text-[10px] truncate block mt-0.5" style={{ color: "var(--ink-3)" }}>
-                      self-evolving • {status?.model || "…"}
+                      {status?.model || "…"}
                     </span>
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={() => setShowLeftSidebar(false)}
-                  className="cursor-pointer rounded-lg p-1.5 transition-colors duration-100"
+                  className="shrink-0 cursor-pointer rounded-lg p-1.5 transition-colors duration-100"
                   style={{ color: "var(--ink-3)", background: "none", border: "none" }}
                   onMouseEnter={(e) => e.currentTarget.style.backgroundColor = "var(--hover)"}
                   onMouseLeave={(e) => e.currentTarget.style.backgroundColor = "transparent"}
@@ -3148,13 +3271,13 @@
               </div>
 
               <div className="px-3 pb-1">
-                <div className="flex items-center gap-1.5 rounded-lg px-2 py-1.5" style={{ backgroundColor: "var(--field)", boxShadow: "var(--shadow-inset-field)" }}>
+                <div className="flex items-center gap-1.5 rounded-lg px-2 py-1" style={{ backgroundColor: "var(--field)" }}>
                   <span style={{ color: "var(--ink-3)" }}><Icons.search /></span>
                   <input
                     type="text"
                     value={sessionQuery}
                     onChange={(e) => setSessionQuery(e.target.value)}
-                    placeholder={isZh ? "搜索会话…" : "Filter sessions…"}
+                    placeholder={isZh ? "搜索" : "Filter"}
                     aria-label={isZh ? "搜索会话" : "Filter sessions"}
                     className="min-w-0 flex-1 bg-transparent text-[11.5px] outline-none"
                     style={{ color: "var(--ink)", border: "none" }}
@@ -3588,11 +3711,7 @@
                               <ThinkingTrace live={false} text={msg.thinking} elapsedMs={msg.thinkingMs} isZh={isZh} defaultOpen={!shouldCollapseThinking(msg.thinking)} />
                             )}
                             {msg.toolCalls && msg.toolCalls.length > 0 && (
-                              <div className="flex flex-col">
-                                {msg.toolCalls.map((tc, i) => (
-                                  <ToolChipRow key={tc.call_id || i} tool={tc} isZh={isZh} onOpenPreview={handleOpenPreview} />
-                                ))}
-                              </div>
+                              <ToolCallsCard toolCalls={msg.toolCalls} isZh={isZh} onOpenPreview={handleOpenPreview} />
                             )}
                             {msg.content && (
                               <div className="md-preview md-inline select-text" style={{ color: "var(--ink)" }}
@@ -3616,11 +3735,7 @@
                           />
                         )}
                         {activeToolCalls.length > 0 && (
-                          <div className="flex flex-col">
-                            {activeToolCalls.map((tc, i) => (
-                              <ToolChipRow key={tc.call_id || i} tool={tc} isZh={isZh} onOpenPreview={handleOpenPreview} />
-                            ))}
-                          </div>
+                          <ToolCallsCard toolCalls={activeToolCalls} isZh={isZh} onOpenPreview={handleOpenPreview} live />
                         )}
                         {activeContent && (
                           <div className="select-text whitespace-pre-wrap text-[13.5px] leading-relaxed" style={{ color: "var(--ink)" }}>
